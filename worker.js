@@ -25,19 +25,47 @@ export default {
       if (!symbol) return json({ error: 'No symbol' }, 400);
 
       const yfSymbol = symbol.replace('.', '-');
-      const headers = { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Accept-Language': 'en-US,en;q=0.9'
-      };
+      
+      // Step 1: Dynamic Cookie-Crumb Acquisition Layer to prevent 401 blocks
+      let session = null;
+      try {
+        const fcRes = await fetch('https://fc.yahoo.com', {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }
+        });
+        const setCookie = fcRes.headers.get('set-cookie');
+        if (setCookie) {
+          const cleanedCookie = setCookie.split(';')[0];
+          const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/finance/crumbs', {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Cookie': cleanedCookie
+            }
+          });
+          const crumbText = await crumbRes.text();
+          if (crumbText && !crumbText.includes('<html>') && !crumbText.includes('Too Many Requests')) {
+            session = { cookie: cleanedCookie, crumb: crumbText.trim() };
+          }
+        }
+      } catch (e) {
+        console.error("Session initialization failure: ", e);
+      }
 
-      // Configuration updates: 1-Year timeline scope
+      const headers = { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      };
+      if (session) {
+        headers['Cookie'] = session.cookie;
+      }
+
+      // Construct verified endpoint queries
+      const crumbParam = session ? `&crumb=${encodeURIComponent(session.crumb)}` : '';
       const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1y&interval=1d`;
-      const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yfSymbol}`;
-      const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${yfSymbol}?modules=summaryDetail,financialData,defaultKeyStatistics`;
+      const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yfSymbol}${crumbParam}`;
+      const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${yfSymbol}?modules=summaryDetail,financialData,defaultKeyStatistics${crumbParam}`;
 
       const [chartRes, quoteRes, summaryRes] = await Promise.allSettled([
-        fetch(chartUrl, { headers }),
+        fetch(chartUrl, { headers: { 'User-Agent': headers['User-Agent'] } }), // Charts don't require cookies
         fetch(quoteUrl, { headers }),
         fetch(summaryUrl, { headers })
       ]);
@@ -50,7 +78,7 @@ export default {
         grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A', revenue: 'N/A'
       };
 
-      // 1. Process Timeline Chart Array
+      // 1. Process High-Availability Chart Array (Always loads)
       if (chartRes.status === 'fulfilled' && chartRes.value.ok) {
         const chartJson = await chartRes.value.json();
         if (chartJson.chart && chartJson.chart.result) {
@@ -80,7 +108,7 @@ export default {
         }
       }
 
-      // 2. Process High-Availability Reference Quote Feed (Fixes N/A Blocks)
+      // 2. Process Authorized Quote Feed (Fixes Top-Level Market Cap and Valuation metrics)
       if (quoteRes.status === 'fulfilled' && quoteRes.value.ok) {
         const quoteJson = await quoteRes.value.json();
         if (quoteJson.quoteResponse && quoteJson.quoteResponse.result && quoteJson.quoteResponse.result[0]) {
@@ -100,12 +128,14 @@ export default {
         }
       }
 
-      // 3. Process Granular Structural Ratios (Enrichment Fallback Layer)
+      // 3. Process Balance Sheet & Structural Ratios
       if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
         const sumJson = await summaryRes.value.json();
         if (sumJson.quoteSummary && sumJson.quoteSummary.result) {
           const res = sumJson.quoteSummary.result[0];
           
+          if (res.price && res.price.marketCap) marketCap = res.price.marketCap.raw || marketCap;
+
           if (res.financialData) {
             const fd = res.financialData;
             if (fd.totalRevenue) fundamentals.revenue = formatLargeNum(fd.totalRevenue.raw);
@@ -116,6 +146,18 @@ export default {
             if (fd.grossMargins) fundamentals.grossMargin = (fd.grossMargins.raw * 100).toFixed(1) + '%';
             if (fd.operatingMargins) fundamentals.operatingMargin = (fd.operatingMargins.raw * 100).toFixed(1) + '%';
             if (fd.profitMargins) fundamentals.netMargin = (fd.profitMargins.raw * 100).toFixed(1) + '%';
+          }
+          if (res.summaryDetail) {
+            const sd = res.summaryDetail;
+            if (sd.trailingPE && fundamentals.pe === 'N/A') fundamentals.pe = sd.trailingPE.raw.toFixed(2);
+            if (sd.forwardPE && fundamentals.forwardPE === 'N/A') fundamentals.forwardPE = sd.forwardPE.raw.toFixed(2);
+            if (sd.priceToSalesTrailing12Months && fundamentals.ps === 'N/A') fundamentals.ps = sd.priceToSalesTrailing12Months.raw.toFixed(2);
+          }
+          if (res.defaultKeyStatistics) {
+            const dks = res.defaultKeyStatistics;
+            if (dks.trailingEps && fundamentals.eps === 'N/A') fundamentals.eps = dks.trailingEps.raw.toFixed(2);
+            if (dks.priceToBook && fundamentals.pb === 'N/A') fundamentals.pb = dks.priceToBook.raw.toFixed(2);
+            if (dks.pegRatio && fundamentals.peg === 'N/A') fundamentals.peg = dks.pegRatio.raw.toFixed(2);
           }
         }
       }
@@ -161,7 +203,7 @@ function formatLargeNum(num) {
   return num.toString();
 }
 
-// --- Render Layout Target Interface ---
+// --- Dynamic Client Application Frame ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -179,43 +221,43 @@ function getAppHTML() {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: monospace; padding-bottom: 40px; }
   header { background: var(--card); padding: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
-  h1 { font-size: 16px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; }
-  .logo { width: 8px; height: 8px; background: var(--accent); border-radius: 50%; }
+  h1 { font-size: 14px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .logo { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; }
   .search-container { position: relative; }
-  input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: monospace; outline: none; }
+  input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-family: monospace; outline: none; }
   input:focus { border-color: var(--accent); }
   #search-results { display: none; position: absolute; top: 42px; left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; z-index: 20; }
   #search-results.show { display: block; }
   .res-item { padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .res-item:active { background: var(--bg); }
-  .res-sym { font-weight: 700; color: var(--accent); font-size: 14px; }
+  .res-sym { font-weight: 700; color: var(--accent); font-size: 13px; }
   .res-name { font-size: 11px; color: var(--muted); margin-top: 2px; }
   
   .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-  .sym { font-size: 16px; font-weight: 700; color: #fff; }
+  .sym { font-size: 15px; font-weight: 700; color: #fff; }
   .name { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .price { text-align: right; }
-  .p-val { font-size: 16px; font-weight: 700; }
+  .p-val { font-size: 15px; font-weight: 700; }
   .p-change { font-size: 11px; font-weight: 600; margin-top: 2px; }
   .up { color: var(--up); } .down { color: var(--down); }
   
   .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
-  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
+  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
   .btn-primary { border-color: var(--accent); color: var(--accent); }
   
   .remove-btn { color: var(--down); background: transparent; border: none; font-size: 11px; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; }
 
-  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 100; padding: 10px; overflow-y: auto; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 100; padding: 10px; overflow-y: auto; }
   #modal.show { display: block; }
   .modal-content { background: var(--card); border-radius: 4px; padding: 12px; border: 1px solid var(--border); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 28px; height: 28px; font-size: 14px; cursor: pointer; }
+  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 26px; height: 26px; font-size: 13px; cursor: pointer; }
   
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .stat { background: var(--bg); padding: 6px; border-radius: 4px; border: 1px solid var(--border); }
-  .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; }
-  .stat-val { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+  .stat-val { font-size: 12px; font-weight: 600; margin-top: 2px; }
   
   #chart-container { height: 110px; margin: 10px 0; position: relative; }
   svg { width: 100%; height: 100%; overflow: visible; }
@@ -228,7 +270,7 @@ function getAppHTML() {
 <header>
   <h1><div class="logo"></div> cloudphone stocktracker</h1>
   <div class="search-container">
-    <input type="text" id="search-input" placeholder="Search Symbol..." autocomplete="off">
+    <input type="text" id="search-input" placeholder="Search Ticker..." autocomplete="off">
     <div id="search-results"></div>
   </div>
 </header>
@@ -238,7 +280,7 @@ function getAppHTML() {
 <div id="modal">
   <div class="modal-content">
     <div class="modal-header">
-      <h2 id="modal-title" style="font-size:14px; text-transform:uppercase;">Details</h2>
+      <h2 id="modal-title" style="font-size:13px; text-transform:uppercase;">Historical Analytics</h2>
       <button class="close-btn" onclick="closeModal()">✕</button>
     </div>
     <div id="modal-body"></div>
@@ -307,7 +349,7 @@ function getAppHTML() {
   async function renderWatchlist() {
     const container = document.getElementById('watchlist');
     if (watchlist.length === 0) {
-      container.innerHTML = '<div class="empty">Watchlist empty. Search to populate data.</div>';
+      container.innerHTML = '<div class="empty">Watchlist empty. Search and build tracking elements.</div>';
       return;
     }
     
@@ -339,7 +381,7 @@ function getAppHTML() {
           </div>
         \`;
       } catch(e) {
-        return \`<div class="card"><div class="sym">\${sym}</div><div class="name" style="color:var(--down)">NET_ERR</div></div>\`;
+        return \`<div class="card"><div class="sym">\${sym}</div><div class="name" style="color:var(--down)">NET_TIMEOUT</div></div>\`;
       }
     }));
     container.innerHTML = html.join('');
@@ -349,7 +391,7 @@ function getAppHTML() {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Historical Matrix';
+    title.innerText = symbol + ' Vector Continuum';
     body.innerHTML = '<div class="empty">COMPUTING PATHWAYS...</div>';
     modal.classList.add('show');
 
@@ -358,7 +400,7 @@ function getAppHTML() {
       const d = await res.json();
       
       if (!d.closes || d.closes.length < 2) {
-        body.innerHTML = '<div class="empty">No vector history available.</div>';
+        body.innerHTML = '<div class="empty">No vector matrix dataset verified.</div>';
         return;
       }
 
@@ -377,20 +419,21 @@ function getAppHTML() {
 
       const color = d.change >= 0 ? 'var(--up)' : 'var(--down)';
       
+      // Fixed the path escaping translation string mismatch bug below
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\text{\${d.changePercent}}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
-            <path d="\${pathData} L\${w-p},\\h-p L\${p},\\h-p Z" fill="\${color}" opacity="0.08" />
+            <path d="\${pathData} L\${w-p},\${h-p} L\${p},\${h-p} Z" fill="\${color}" opacity="0.08" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
         </div>
         <div class="timeline-label">
           <span>\${d.startDate}</span>
-          <span style="color:var(--accent);">1Y Range Spectrum</span>
+          <span style="color:var(--accent);">1Y Price Vector Spectrum</span>
           <span>\${d.endDate}</span>
         </div>
         <div class="grid">
@@ -409,8 +452,8 @@ function getAppHTML() {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Core Fundamentals';
-    body.innerHTML = '<div class="empty">PARSING EXCHANGES...</div>';
+    title.innerText = symbol + ' Fundamental Data';
+    body.innerHTML = '<div class="empty">DECODING FINANCIAL LEDGERS...</div>';
     modal.classList.add('show');
 
     try {
@@ -442,7 +485,7 @@ function getAppHTML() {
         </div>
       \`;
     } catch(e) {
-      body.innerHTML = '<div class="empty">Fundamental interpretation timeout.</div>';
+      body.innerHTML = '<div class="empty">Ledger interpretation timeout error.</div>';
     }
   }
 
