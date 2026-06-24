@@ -8,12 +8,12 @@ export default {
       if (!q) return json([]);
       
       const res = await fetch(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
       });
       const data = await res.json();
       
       const results = (data.quotes || [])
-        .filter(q => q.quoteType === 'EQUITY' || q.quotetype === 'ETF')
+        .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF')
         .map(q => ({ symbol: q.symbol, name: q.shortname || q.longname || q.symbol }));
         
       return json(results);
@@ -25,50 +25,97 @@ export default {
       if (!symbol) return json({ error: 'No symbol' }, 400);
 
       const yfSymbol = symbol.replace('.', '-');
-      const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+      const headers = { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9'
+      };
 
-      const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1mo&interval=1d`;
-      const summaryUrl = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yfSymbol}?modules=price,summaryDetail,financialData,defaultKeyStatistics`;
+      // Configuration updates: 1-Year timeline scope
+      const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1y&interval=1d`;
+      const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yfSymbol}`;
+      const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${yfSymbol}?modules=summaryDetail,financialData,defaultKeyStatistics`;
 
-      const [chartRes, summaryRes] = await Promise.allSettled([
+      const [chartRes, quoteRes, summaryRes] = await Promise.allSettled([
         fetch(chartUrl, { headers }),
+        fetch(quoteUrl, { headers }),
         fetch(summaryUrl, { headers })
       ]);
 
       let price = 0, prevClose = 0, name = symbol, closes = [], volume = 0, marketCap = 0;
-      let fundamentals = {};
+      let startDateStr = 'N/A', endDateStr = 'N/A';
+      let fundamentals = {
+        pe: 'N/A', forwardPE: 'N/A', peg: 'N/A', pb: 'N/A', ps: 'N/A', eps: 'N/A',
+        currentRatio: 'N/A', quickRatio: 'N/A', de: 'N/A', roe: 'N/A',
+        grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A', revenue: 'N/A'
+      };
 
+      // 1. Process Timeline Chart Array
       if (chartRes.status === 'fulfilled' && chartRes.value.ok) {
         const chartJson = await chartRes.value.json();
         if (chartJson.chart && chartJson.chart.result) {
           const result = chartJson.chart.result[0];
-          closes = result.indicators.quote[0].close.filter(c => c !== null);
-          price = result.meta.regularMarketPrice;
-          prevClose = result.meta.chartPreviousClose;
-          volume = result.meta.regularMarketVolume;
+          const quoteIndicator = result.indicators.quote[0];
+          const validPoints = [];
+          
+          if (result.timestamp && quoteIndicator && quoteIndicator.close) {
+            result.timestamp.forEach((t, i) => {
+              const c = quoteIndicator.close[i];
+              if (c !== null && c !== undefined) {
+                validPoints.push({ time: t, close: c });
+              }
+            });
+          }
+          
+          closes = validPoints.map(p => p.close);
+          price = result.meta.regularMarketPrice || price;
+          prevClose = result.meta.chartPreviousClose || prevClose;
+          volume = result.meta.regularMarketVolume || volume;
           name = result.meta.shortName || result.meta.longName || symbol;
+
+          if (validPoints.length > 0) {
+            startDateStr = new Date(validPoints[0].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+            endDateStr = new Date(validPoints[validPoints.length - 1].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+          }
         }
       }
 
+      // 2. Process High-Availability Reference Quote Feed (Fixes N/A Blocks)
+      if (quoteRes.status === 'fulfilled' && quoteRes.value.ok) {
+        const quoteJson = await quoteRes.value.json();
+        if (quoteJson.quoteResponse && quoteJson.quoteResponse.result && quoteJson.quoteResponse.result[0]) {
+          const q = quoteJson.quoteResponse.result[0];
+          price = q.regularMarketPrice || price;
+          prevClose = q.regularMarketPreviousClose || prevClose;
+          volume = q.regularMarketVolume || volume;
+          marketCap = q.marketCap || marketCap;
+          name = q.shortName || q.longName || name;
+
+          if (q.trailingPE) fundamentals.pe = q.trailingPE.toFixed(2);
+          if (q.forwardPE) fundamentals.forwardPE = q.forwardPE.toFixed(2);
+          if (q.trailingPegRatio) fundamentals.peg = q.trailingPegRatio.toFixed(2);
+          if (q.priceToBook) fundamentals.pb = q.priceToBook.toFixed(2);
+          if (q.priceToSalesTrailing12Months) fundamentals.ps = q.priceToSalesTrailing12Months.toFixed(2);
+          if (q.trailingEps) fundamentals.eps = q.trailingEps.toFixed(2);
+        }
+      }
+
+      // 3. Process Granular Structural Ratios (Enrichment Fallback Layer)
       if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
         const sumJson = await summaryRes.value.json();
         if (sumJson.quoteSummary && sumJson.quoteSummary.result) {
           const res = sumJson.quoteSummary.result[0];
-          if (res.price) {
-            if (res.price.regularMarketPrice) price = res.price.regularMarketPrice.raw;
-            if (res.price.shortName) name = res.price.shortName;
-            if (res.price.marketCap) marketCap = res.price.marketCap.raw;
-          }
-          if (res.summaryDetail) {
-            if (res.summaryDetail.trailingPE) fundamentals.pe = res.summaryDetail.trailingPE.raw.toFixed(2);
-            if (res.summaryDetail.volume) volume = res.summaryDetail.volume.raw;
-          }
+          
           if (res.financialData) {
-            if (res.financialData.totalRevenue) fundamentals.revenue = formatLargeNum(res.financialData.totalRevenue.raw);
-            if (res.financialData.quickRatio) fundamentals.quickRatio = res.financialData.quickRatio.raw.toFixed(2);
-            if (res.financialData.currentRatio) fundamentals.currentRatio = res.financialData.currentRatio.raw.toFixed(2);
-            if (res.financialData.debtToEquity) fundamentals.de = res.financialData.debtToEquity.raw.toFixed(2);
-            if (res.financialData.returnOnEquity) fundamentals.roe = (res.financialData.returnOnEquity.raw * 100).toFixed(1) + '%';
+            const fd = res.financialData;
+            if (fd.totalRevenue) fundamentals.revenue = formatLargeNum(fd.totalRevenue.raw);
+            if (fd.quickRatio) fundamentals.quickRatio = fd.quickRatio.raw.toFixed(2);
+            if (fd.currentRatio) fundamentals.currentRatio = fd.currentRatio.raw.toFixed(2);
+            if (fd.debtToEquity) fundamentals.de = fd.debtToEquity.raw.toFixed(2);
+            if (fd.returnOnEquity) fundamentals.roe = (fd.returnOnEquity.raw * 100).toFixed(1) + '%';
+            if (fd.grossMargins) fundamentals.grossMargin = (fd.grossMargins.raw * 100).toFixed(1) + '%';
+            if (fd.operatingMargins) fundamentals.operatingMargin = (fd.operatingMargins.raw * 100).toFixed(1) + '%';
+            if (fd.profitMargins) fundamentals.netMargin = (fd.profitMargins.raw * 100).toFixed(1) + '%';
           }
         }
       }
@@ -85,6 +132,8 @@ export default {
         marketCap: marketCap ? formatLargeNum(marketCap) : 'N/A',
         volume: volume ? formatLargeNum(volume) : 'N/A',
         closes,
+        startDate: startDateStr,
+        endDate: endDateStr,
         fundamentals
       });
     }
@@ -112,7 +161,7 @@ function formatLargeNum(num) {
   return num.toString();
 }
 
-// --- The Modern UI & Client-Side App ---
+// --- Render Layout Target Interface ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -120,66 +169,66 @@ function getAppHTML() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>StockTracker Pro</title>
+<title>cloudphone stocktracker</title>
 <style>
   :root {
-    --bg: #0f1117; --card: #1a1d29; --border: #2a2e3d; 
-    --text: #e4e7eb; --muted: #8b8f9b; 
-    --up: #0ecb81; --down: #f6465d; --accent: #1e90ff;
+    --bg: #000000; --card: #111111; --border: #222222; 
+    --text: #ffffff; --muted: #888888; 
+    --up: #00ff00; --down: #ff0000; --accent: #00ff00;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding-bottom: 40px; }
-  header { background: var(--card); padding: 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
-  h1 { font-size: 18px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-  .logo { width: 12px; height: 12px; background: var(--accent); border-radius: 2px; box-shadow: 0 0 8px var(--accent); }
+  body { background: var(--bg); color: var(--text); font-family: monospace; padding-bottom: 40px; }
+  header { background: var(--card); padding: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  h1 { font-size: 16px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; }
+  .logo { width: 8px; height: 8px; background: var(--accent); border-radius: 50%; }
   .search-container { position: relative; }
-  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; outline: none; }
+  input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: monospace; outline: none; }
   input:focus { border-color: var(--accent); }
-  #search-results { display: none; position: absolute; top: 48px; left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; z-index: 20; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  #search-results { display: none; position: absolute; top: 42px; left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; z-index: 20; }
   #search-results.show { display: block; }
-  .res-item { padding: 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .res-item { padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .res-item:active { background: var(--bg); }
   .res-sym { font-weight: 700; color: var(--accent); font-size: 14px; }
-  .res-name { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .res-name { font-size: 11px; color: var(--muted); margin-top: 2px; }
   
-  .card { background: var(--card); margin: 12px; padding: 16px; border-radius: 12px; border: 1px solid var(--border); }
-  .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-  .sym { font-size: 18px; font-weight: 700; }
-  .name { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
+  .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+  .sym { font-size: 16px; font-weight: 700; color: #fff; }
+  .name { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .price { text-align: right; }
-  .p-val { font-size: 18px; font-weight: 700; }
-  .p-change { font-size: 12px; font-weight: 600; margin-top: 2px; }
+  .p-val { font-size: 16px; font-weight: 700; }
+  .p-change { font-size: 11px; font-weight: 600; margin-top: 2px; }
   .up { color: var(--up); } .down { color: var(--down); }
   
-  .card-links { display: flex; gap: 8px; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
-  .btn { flex: 1; text-align: center; padding: 10px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
-  .btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
-  .btn:active { transform: scale(0.98); }
-  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 12px; margin-top: 8px; cursor: pointer; padding: 0; }
+  .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
+  .btn-primary { border-color: var(--accent); color: var(--accent); }
+  
+  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 11px; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; }
 
-  /* Modal */
-  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100; padding: 20px; overflow-y: auto; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 100; padding: 10px; overflow-y: auto; }
   #modal.show { display: block; }
-  .modal-content { background: var(--card); border-radius: 12px; padding: 16px; border: 1px solid var(--border); margin-top: 20px; }
-  .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 50%; width: 30px; height: 30px; font-size: 16px; cursor: pointer; }
+  .modal-content { background: var(--card); border-radius: 4px; padding: 12px; border: 1px solid var(--border); }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 28px; height: 28px; font-size: 14px; cursor: pointer; }
   
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .stat { background: var(--bg); padding: 10px; border-radius: 8px; border: 1px solid var(--border); }
-  .stat-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; }
-  .stat-val { font-size: 16px; font-weight: 600; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .stat { background: var(--bg); padding: 6px; border-radius: 4px; border: 1px solid var(--border); }
+  .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+  .stat-val { font-size: 13px; font-weight: 600; margin-top: 2px; }
   
-  #chart-container { height: 150px; margin: 16px 0; position: relative; }
+  #chart-container { height: 110px; margin: 10px 0; position: relative; }
   svg { width: 100%; height: 100%; overflow: visible; }
-  .empty { text-align: center; padding: 40px 20px; color: var(--muted); }
+  .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 12px; }
+  .timeline-label { display: flex; justify-content: space-between; margin-top: -4px; margin-bottom: 12px; font-size: 10px; color: var(--muted); }
 </style>
 </head>
 <body>
 
 <header>
-  <h1><div class="logo"></div> StockTracker Pro</h1>
+  <h1><div class="logo"></div> cloudphone stocktracker</h1>
   <div class="search-container">
-    <input type="text" id="search-input" placeholder="Search company (e.g. Google)" autocomplete="off">
+    <input type="text" id="search-input" placeholder="Search Symbol..." autocomplete="off">
     <div id="search-results"></div>
   </div>
 </header>
@@ -189,7 +238,7 @@ function getAppHTML() {
 <div id="modal">
   <div class="modal-content">
     <div class="modal-header">
-      <h2 id="modal-title">Details</h2>
+      <h2 id="modal-title" style="font-size:14px; text-transform:uppercase;">Details</h2>
       <button class="close-btn" onclick="closeModal()">✕</button>
     </div>
     <div id="modal-body"></div>
@@ -199,18 +248,16 @@ function getAppHTML() {
 <script>
   let watchlist = [];
 
-  // Init from URL (Database-free persistence)
   const urlParams = new URLSearchParams(window.location.search);
   const sParam = urlParams.get('s');
   if (sParam) watchlist = sParam.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
-  if (watchlist.length === 0) watchlist = ['AAPL', 'TSLA', 'MSFT'];
+  if (watchlist.length === 0) watchlist = ['AAPL', 'MSFT', 'GOOG'];
 
   function updateUrl() {
     const newUrl = window.location.pathname + '?s=' + watchlist.join(',');
     window.history.replaceState({}, '', newUrl);
   }
 
-  // Debounce search
   let searchTimeout;
   document.getElementById('search-input').addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
@@ -260,11 +307,11 @@ function getAppHTML() {
   async function renderWatchlist() {
     const container = document.getElementById('watchlist');
     if (watchlist.length === 0) {
-      container.innerHTML = '<div class="empty">Watchlist empty. Search to add stocks.</div>';
+      container.innerHTML = '<div class="empty">Watchlist empty. Search to populate data.</div>';
       return;
     }
     
-    container.innerHTML = '<div class="empty">Loading market data...</div>';
+    container.innerHTML = '<div class="empty">SYNCING MARKET MATRIX...</div>';
     const html = await Promise.all(watchlist.map(async sym => {
       try {
         const res = await fetch('/api/stock?s=' + sym);
@@ -285,14 +332,14 @@ function getAppHTML() {
               </div>
             </div>
             <div class="card-links">
-              <a href="#" class="btn" onclick="openChart('\${sym}'); return false;">Chart</a>
-              <a href="#" class="btn btn-primary" onclick="openScreener('\${sym}'); return false;">Screener</a>
+              <a href="#" class="btn" onclick="openChart('\${sym}'); return false;">CHART</a>
+              <a href="#" class="btn btn-primary" onclick="openScreener('\${sym}'); return false;">SCREENER</a>
             </div>
-            <button class="remove-btn" onclick="removeStock('\${sym}')">REMOVE</button>
+            <button class="remove-btn" onclick="removeStock('\${sym}')">[Drop Element]</button>
           </div>
         \`;
       } catch(e) {
-        return \`<div class="card"><div class="sym">\${sym}</div><div class="name" style="color:var(--down)">Error loading data.</div></div>\`;
+        return \`<div class="card"><div class="sym">\${sym}</div><div class="name" style="color:var(--down)">NET_ERR</div></div>\`;
       }
     }));
     container.innerHTML = html.join('');
@@ -302,8 +349,8 @@ function getAppHTML() {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Chart';
-    body.innerHTML = '<div class="empty">Loading chart...</div>';
+    title.innerText = symbol + ' Historical Matrix';
+    body.innerHTML = '<div class="empty">COMPUTING PATHWAYS...</div>';
     modal.classList.add('show');
 
     try {
@@ -311,12 +358,12 @@ function getAppHTML() {
       const d = await res.json();
       
       if (!d.closes || d.closes.length < 2) {
-        body.innerHTML = '<div class="empty">No chart data available.</div>';
+        body.innerHTML = '<div class="empty">No vector history available.</div>';
         return;
       }
 
       const data = d.closes;
-      const w = 250, h = 150, p = 10;
+      const w = 220, h = 100, p = 5;
       const min = Math.min(...data), max = Math.max(...data);
       const range = max - min || 1;
       const stepX = (w - p * 2) / (data.length - 1);
@@ -333,23 +380,28 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\text{\${d.changePercent}}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
-            <path d="\${pathData} L\${w-p},\${h-p} L\${p},\${h-p} Z" fill="\${color}" opacity="0.1" />
-            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="2" stroke-linejoin="round" />
+            <path d="\${pathData} L\${w-p},\\h-p L\${p},\\h-p Z" fill="\${color}" opacity="0.08" />
+            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
         </div>
+        <div class="timeline-label">
+          <span>\${d.startDate}</span>
+          <span style="color:var(--accent);">1Y Range Spectrum</span>
+          <span>\${d.endDate}</span>
+        </div>
         <div class="grid">
-          <div class="stat"><div class="stat-lbl">30d High</div><div class="stat-val">\${max.toFixed(2)}</div></div>
-          <div class="stat"><div class="stat-lbl">30d Low</div><div class="stat-val">\${min.toFixed(2)}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\${max.toFixed(2)}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\${min.toFixed(2)}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
         </div>
       \`;
     } catch(e) {
-      body.innerHTML = '<div class="empty">Error loading chart.</div>';
+      body.innerHTML = '<div class="empty">Chart processing pipeline failure.</div>';
     }
   }
 
@@ -357,8 +409,8 @@ function getAppHTML() {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Fundamentals';
-    body.innerHTML = '<div class="empty">Loading fundamentals...</div>';
+    title.innerText = symbol + ' Core Fundamentals';
+    body.innerHTML = '<div class="empty">PARSING EXCHANGES...</div>';
     modal.classList.add('show');
 
     try {
@@ -367,22 +419,30 @@ function getAppHTML() {
       const f = d.fundamentals;
       
       body.innerHTML = \`
-        <div class="card-top" style="margin-bottom:20px;">
+        <div class="card-top" style="margin-bottom:12px;">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
         </div>
         <div class="grid">
-          <div class="stat"><div class="stat-lbl">P/E Ratio</div><div class="stat-val">\${f.pe || 'N/A'}</div></div>
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
-          <div class="stat"><div class="stat-lbl">Revenue</div><div class="stat-val">\${f.revenue || 'N/A'}</div></div>
+          <div class="stat"><div class="stat-lbl">Trailing P/E</div><div class="stat-val">\${f.pe}</div></div>
+          <div class="stat"><div class="stat-lbl">Forward P/E</div><div class="stat-val">\${f.forwardPE}</div></div>
+          <div class="stat"><div class="stat-lbl">PEG Ratio</div><div class="stat-val">\${f.peg}</div></div>
+          <div class="stat"><div class="stat-lbl">P/B Ratio</div><div class="stat-val">\${f.pb}</div></div>
+          <div class="stat"><div class="stat-lbl">P/S Ratio</div><div class="stat-val">\${f.ps}</div></div>
+          <div class="stat"><div class="stat-lbl">EPS (TTM)</div><div class="stat-val">\${f.eps}</div></div>
+          <div class="stat"><div class="stat-lbl">Current Ratio</div><div class="stat-val">\${f.currentRatio}</div></div>
+          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\${f.quickRatio}</div></div>
+          <div class="stat"><div class="stat-lbl">Debt/Equity</div><div class="stat-val">\${f.de}</div></div>
+          <div class="stat"><div class="stat-lbl">Return on Equity</div><div class="stat-val">\${f.roe}</div></div>
+          <div class="stat"><div class="stat-lbl">Gross Margin</div><div class="stat-val">\${f.grossMargin}</div></div>
+          <div class="stat"><div class="stat-lbl">Operating Margin</div><div class="stat-val">\${f.operatingMargin}</div></div>
+          <div class="stat"><div class="stat-lbl">Net Margin</div><div class="stat-val">\${f.netMargin}</div></div>
+          <div class="stat"><div class="stat-lbl">Revenue</div><div class="stat-val">\${f.revenue}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
-          <div class="stat"><div class="stat-lbl">Quick Ratio</div><div class="stat-val">\${f.quickRatio || 'N/A'}</div></div>
-          <div class="stat"><div class="stat-lbl">Current Ratio</div><div class="stat-val">\${f.currentRatio || 'N/A'}</div></div>
-          <div class="stat"><div class="stat-lbl">Debt/Equity</div><div class="stat-val">\${f.de || 'N/A'}</div></div>
-          <div class="stat"><div class="stat-lbl">Return on Equity</div><div class="stat-val">\${f.roe || 'N/A'}</div></div>
         </div>
       \`;
     } catch(e) {
-      body.innerHTML = '<div class="empty">Error loading fundamentals.</div>';
+      body.innerHTML = '<div class="empty">Fundamental interpretation timeout.</div>';
     }
   }
 
@@ -390,7 +450,7 @@ function getAppHTML() {
     document.getElementById('modal').classList.remove('show');
   }
 
-  // Initial Load
+  // Initial Boot Vector
   renderWatchlist();
 </script>
 </body>
