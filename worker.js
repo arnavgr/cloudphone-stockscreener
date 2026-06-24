@@ -1,7 +1,7 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const fmpKey = env.FMP_API_KEY || "demo"; // Loaded via Cloudflare Variables/Secrets Dashboard
+    const fmpKey = env.FMP_API_KEY || ""; // Set this variable securely in your Cloudflare Dashboard
 
     // API Route: Ticker lookup engine
     if (url.pathname === '/api/search') {
@@ -19,7 +19,7 @@ export default {
       return json(results);
     }
 
-    // API Route: Balanced High-Speed Analytical Data Aggregator
+    // API Route: Unified Stock Processing Engine
     if (url.pathname === '/api/stock') {
       const symbol = url.searchParams.get('s');
       if (!symbol) return json({ error: 'No symbol provided' }, 400);
@@ -27,30 +27,20 @@ export default {
       const cleanSymbol = symbol.toUpperCase().trim();
       const yfSymbol = cleanSymbol.replace('.', '-');
 
-      // Endpoints Config
+      // Pipeline A: Live Pricing Execution (Bypasses blocks via un-gated chart modules)
       const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1y&interval=1d`;
-      const fmpProfileUrl = `https://financialmodelingprep.com/api/v3/profile/${cleanSymbol}?apikey=${fmpKey}`;
-      const fmpRatiosUrl = `https://financialmodelingprep.com/api/v3/ratios-ttm/${cleanSymbol}?apikey=${fmpKey}`;
-
-      // Parallel Fetch Execution: Yahoo runs live, FMP runs through 24-Hour Edge Isolation Caching
-      const [chartRes, profileRes, ratiosRes] = await Promise.allSettled([
-        fetch(chartUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } }), // Real-time Live Price/Chart data
-        fetch(fmpProfileUrl, { cf: { cacheTtl: 86400, cacheEverything: true } }), // Cached 24 Hours
-        fetch(fmpRatiosUrl, { cf: { cacheTtl: 86400, cacheEverything: true } })    // Cached 24 Hours
-      ]);
+      let chartRes;
+      try {
+        chartRes = await fetch(chartUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      } catch (e) {
+        chartRes = null;
+      }
 
       let price = 0, prevClose = 0, name = cleanSymbol, closes = [], volume = 0, marketCap = 0;
       let startDateStr = 'N/A', endDateStr = 'N/A', yearHigh = 0, yearLow = 0;
-      
-      let fundamentals = {
-        pe: 'N/A', forwardPE: 'N/A', peg: 'N/A', pb: 'N/A', ps: 'N/A', eps: 'N/A',
-        currentRatio: 'N/A', quickRatio: 'N/A', de: 'N/A', roe: 'N/A',
-        grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A', revenue: 'N/A'
-      };
 
-      // 1. Process Yahoo Time-Series Arrays (Live Intraday Metrics)
-      if (chartRes.status === 'fulfilled' && chartRes.value.ok) {
-        const chartJson = await chartRes.value.json();
+      if (chartRes && chartRes.ok) {
+        const chartJson = await chartRes.json();
         if (chartJson.chart && chartJson.chart.result) {
           const result = chartJson.chart.result[0];
           const quoteIndicator = result.indicators.quote[0];
@@ -59,9 +49,7 @@ export default {
           if (result.timestamp && quoteIndicator && quoteIndicator.close) {
             result.timestamp.forEach((t, i) => {
               const c = quoteIndicator.close[i];
-              if (c !== null && c !== undefined) {
-                validPoints.push({ time: t, close: c });
-              }
+              if (c !== null && c !== undefined) validPoints.push({ time: t, close: c });
             });
           }
           
@@ -80,44 +68,60 @@ export default {
         }
       }
 
-      // 2. Process FMP Profile Layer (Cached Essentials)
-      if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
-        const pJson = await profileRes.value.json();
-        if (pJson && pJson.length > 0) {
-          const p = pJson[0];
-          marketCap = p.mcap || marketCap;
-          fundamentals.eps = p.eps ? p.eps.toFixed(2) : 'N/A';
-          if (p.companyName) name = p.companyName;
-        }
-      }
+      // Pipeline B: Granular Fundamental Ratios Layer
+      let fundamentals = {
+        pe: 'N/A', forwardPE: 'N/A', peg: 'N/A', pb: 'N/A', ps: 'N/A', eps: 'N/A',
+        currentRatio: 'N/A', quickRatio: 'N/A', de: 'N/A', roe: 'N/A',
+        grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A'
+      };
 
-      // 3. Process FMP Trailing Accounting Ratios (Cached In-Depth Fundamentals Checklist)
-      if (ratiosRes.status === 'fulfilled' && ratiosRes.value.ok) {
-        const rJson = await ratiosRes.value.json();
-        if (rJson && rJson.length > 0) {
-          const r = rJson[0];
-          
-          // Valuation Multiples
-          if (r.priceEarningsRatioTTM) fundamentals.pe = r.priceEarningsRatioTTM.toFixed(2);
-          if (r.pegRatioTTM) fundamentals.peg = r.pegRatioTTM.toFixed(2);
-          if (r.priceToBookRatioTTM) fundamentals.pb = r.priceToBookRatioTTM.toFixed(2);
-          if (r.priceToSalesRatioTTM) fundamentals.ps = r.priceToSalesRatioTTM.toFixed(2);
-          
-          // Liquidity & Structural Debt
-          if (r.currentRatioTTM) fundamentals.currentRatio = r.currentRatioTTM.toFixed(2);
-          if (r.quickRatioTTM) fundamentals.quickRatio = r.quickRatioTTM.toFixed(2);
-          if (r.debtEquityRatioTTM) fundamentals.de = r.debtEquityRatioTTM.toFixed(2);
-          if (r.returnOnEquityTTM) fundamentals.roe = (r.returnOnEquityTTM * 100).toFixed(1) + '%';
-          
-          // Margins & Revenue Matrix
-          if (r.grossProfitMarginTTM) fundamentals.grossMargin = (r.grossProfitMarginTTM * 100).toFixed(1) + '%';
-          if (r.operatingProfitMarginTTM) fundamentals.operatingMargin = (r.operatingProfitMarginTTM * 100).toFixed(1) + '%';
-          if (r.netProfitMarginTTM) fundamentals.netMargin = (r.netProfitMarginTTM * 100).toFixed(1) + '%';
-        }
-      }
+      if (fmpKey && fmpKey !== "demo") {
+        try {
+          const fmpProfileUrl = `https://financialmodelingprep.com/api/v3/profile/${cleanSymbol}?apikey=${fmpKey}`;
+          const fmpRatiosUrl = `https://financialmodelingprep.com/api/v3/ratios-ttm/${cleanSymbol}?apikey=${fmpKey}`;
 
-      const change = price - prevClose;
-      const changePercent = prevClose ? (change / prevClose) * 100 : 0;
+          const [fmpProfileRes, fmpRatiosRes] = await Promise.all([
+            fetch(fmpProfileUrl, { cf: { cacheTtl: 86400, cacheEverything: true } }),
+            fetch(fmpRatiosUrl, { cf: { cacheTtl: 86400, cacheEverything: true } })
+          ]);
+
+          if (fmpProfileRes.ok) {
+            const pJson = await fmpProfileRes.json();
+            if (pJson && pJson.length > 0) {
+              marketCap = pJson[0].marketCap || marketCap; // Fixed schema pointer mapping
+              fundamentals.eps = pJson[0].eps ? pJson[0].eps.toFixed(2) : 'N/A';
+              if (pJson[0].companyName) name = pJson[0].companyName;
+            }
+          }
+
+          if (fmpRatiosRes.ok) {
+            const rJson = await fmpRatiosRes.json();
+            if (rJson && rJson.length > 0) {
+              const r = rJson[0];
+              if (r.priceEarningsRatioTTM) fundamentals.pe = r.priceEarningsRatioTTM.toFixed(2);
+              if (r.pegRatioTTM) fundamentals.peg = r.pegRatioTTM.toFixed(2);
+              if (r.priceToBookRatioTTM) fundamentals.pb = r.priceToBookRatioTTM.toFixed(2);
+              if (r.priceToSalesRatioTTM) fundamentals.ps = r.priceToSalesRatioTTM.toFixed(2);
+              if (r.currentRatioTTM) fundamentals.currentRatio = r.currentRatioTTM.toFixed(2);
+              if (r.quickRatioTTM) fundamentals.quickRatio = r.quickRatioTTM.toFixed(2);
+              if (r.debtEquityRatioTTM) fundamentals.de = r.debtEquityRatioTTM.toFixed(2);
+              if (r.returnOnEquityTTM) fundamentals.roe = (r.returnOnEquityTTM * 100).toFixed(1) + '%';
+              if (r.grossProfitMarginTTM) fundamentals.grossMargin = (r.grossProfitMarginTTM * 100).toFixed(1) + '%';
+              if (r.operatingProfitMarginTTM) fundamentals.operatingMargin = (r.operatingProfitMarginTTM * 100).toFixed(1) + '%';
+              if (r.netProfitMarginTTM) fundamentals.netMargin = (r.netProfitMarginTTM * 100).toFixed(1) + '%';
+            }
+          }
+        } catch (err) {
+          console.error("API Execution Error:", err);
+        }
+      } else {
+        // Flag to explicitly prompt parameter configuration
+        fundamentals = {
+          pe: 'SET_KEY', forwardPE: 'SET_KEY', peg: 'SET_KEY', pb: 'SET_KEY', ps: 'SET_KEY', eps: 'SET_KEY',
+          currentRatio: 'SET_KEY', quickRatio: 'SET_KEY', de: 'SET_KEY', roe: 'SET_KEY',
+          grossMargin: 'SET_KEY', operatingMargin: 'SET_KEY', netMargin: 'SET_KEY'
+        };
+      }
 
       return json({
         symbol: cleanSymbol,
@@ -142,7 +146,7 @@ export default {
   }
 };
 
-// --- Utilities & Converters ---
+// --- Utilities ---
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -158,7 +162,7 @@ function formatLargeNum(num) {
   return num.toString();
 }
 
-// --- Frame Rendering Core HTML Layout ---
+// --- Layout Matrix Generation ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -321,7 +325,7 @@ function getAppHTML() {
             <div class="card-top">
               <div>
                 <div class="sym">\${d.symbol}</div>
-                <div class="name">\text{\${d.name}}</div>
+                <div class="name">\${d.name}</div>
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
@@ -355,7 +359,7 @@ function getAppHTML() {
       const d = await res.json();
       
       if (!d.closes || d.closes.length < 2) {
-        body.innerHTML = '<div class="empty">No vector dataset available.</div>';
+        body.innerHTML = '<div class="empty">No vector matrix dataset verified.</div>';
         return;
       }
 
@@ -380,11 +384,11 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \text{\${d.change >= 0 ? 'up' : 'down'}}">\text{\${d.changePercent}}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
-            <path d="\${pathData} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
+            <path d="\text{\${pathData}} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
         </div>
@@ -394,8 +398,8 @@ function getAppHTML() {
           <span>\${d.endDate}</span>
         </div>
         <div class="grid">
-          <div class="stat"><div class="stat-lbl">30d High</div><div class="stat-val">\${d.yearHigh}</div></div>
-          <div class="stat"><div class="stat-lbl">30d Low</div><div class="stat-val">\${d.yearLow}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\${d.yearHigh}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\${d.yearLow}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
         </div>
@@ -426,12 +430,12 @@ function getAppHTML() {
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
           <div class="stat"><div class="stat-lbl">P/E Ratio</div><div class="stat-val">\${f.pe}</div></div>
-          <div class="stat"><div class="stat-lbl">PEG Ratio</div><div class="stat-val">\text{\${f.peg}}</div></div>
+          <div class="stat"><div class="stat-lbl">PEG Ratio</div><div class="stat-val">\${f.peg}</div></div>
           <div class="stat"><div class="stat-lbl">P/B Ratio</div><div class="stat-val">\${f.pb}</div></div>
           <div class="stat"><div class="stat-lbl">P/S Ratio</div><div class="stat-val">\${f.ps}</div></div>
           <div class="stat"><div class="stat-lbl">EPS (TTM)</div><div class="stat-val">\${f.eps}</div></div>
           <div class="stat"><div class="stat-lbl">Current Ratio</div><div class="stat-val">\${f.currentRatio}</div></div>
-          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\text{\${f.quickRatio}}</div></div>
+          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\s\${f.quickRatio}</div></div>
           <div class="stat"><div class="stat-lbl">Debt/Equity</div><div class="stat-val">\${f.de}</div></div>
           <div class="stat"><div class="stat-lbl">Return on Equity</div><div class="stat-val">\${f.roe}</div></div>
           <div class="stat"><div class="stat-lbl">Gross Margin</div><div class="stat-val">\${f.grossMargin}</div></div>
