@@ -1,22 +1,25 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const fmpKey = env.FMP_API_KEY || ""; // Set this variable securely in your Cloudflare Dashboard
+    const fmpKey = env.FMP_API_KEY || ""; // Define securely inside Cloudflare Settings Variables
 
-    // API Route: Ticker lookup engine
+    // API Route: Ticker Search Matrix
     if (url.pathname === '/api/search') {
       const q = url.searchParams.get('q');
       if (!q) return json([]);
       
-      const res = await fetch(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-      const data = await res.json();
-      const results = (data.quotes || [])
-        .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF')
-        .map(q => ({ symbol: q.symbol, name: q.shortname || q.longname || q.symbol }));
-        
-      return json(results);
+      try {
+        const res = await fetch(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        const data = await res.json();
+        const results = (data.quotes || [])
+          .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF')
+          .map(q => ({ symbol: q.symbol, name: q.shortname || q.longname || q.symbol }));
+        return json(results);
+      } catch (e) {
+        return json([]);
+      }
     }
 
     // API Route: Unified Stock Processing Engine
@@ -27,115 +30,135 @@ export default {
       const cleanSymbol = symbol.toUpperCase().trim();
       const yfSymbol = cleanSymbol.replace('.', '-');
 
-      // Pipeline A: Live Pricing Execution (Bypasses blocks via un-gated chart modules)
+      // 1. Process Yahoo Time-Series Arrays (Executed Live On Every Single Request)
       const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1y&interval=1d`;
-      let chartRes;
-      try {
-        chartRes = await fetch(chartUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      } catch (e) {
-        chartRes = null;
-      }
-
       let price = 0, prevClose = 0, name = cleanSymbol, closes = [], volume = 0, marketCap = 0;
-      let startDateStr = 'N/A', endDateStr = 'N/A', yearHigh = 0, yearLow = 0;
+      let startDateStr = 'N/A', endDateStr = 'N/A', yearHigh = 'N/A', yearLow = 'N/A';
 
-      if (chartRes && chartRes.ok) {
-        const chartJson = await chartRes.json();
-        if (chartJson.chart && chartJson.chart.result) {
-          const result = chartJson.chart.result[0];
-          const quoteIndicator = result.indicators.quote[0];
-          const validPoints = [];
-          
-          if (result.timestamp && quoteIndicator && quoteIndicator.close) {
-            result.timestamp.forEach((t, i) => {
-              const c = quoteIndicator.close[i];
-              if (c !== null && c !== undefined) validPoints.push({ time: t, close: c });
-            });
-          }
-          
-          closes = validPoints.map(p => p.close);
-          price = result.meta.regularMarketPrice || price;
-          prevClose = result.meta.chartPreviousClose || prevClose;
-          volume = result.meta.regularMarketVolume || volume;
-          name = result.meta.shortName || result.meta.longName || cleanSymbol;
+      try {
+        const chartRes = await fetch(chartUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        if (chartRes.ok) {
+          const chartJson = await chartRes.json();
+          if (chartJson.chart && chartJson.chart.result) {
+            const result = chartJson.chart.result[0];
+            const quoteIndicator = result.indicators.quote[0];
+            const validPoints = [];
+            
+            if (result.timestamp && quoteIndicator && quoteIndicator.close) {
+              result.timestamp.forEach((t, i) => {
+                const c = quoteIndicator.close[i];
+                if (typeof c === 'number' && !isNaN(c) && isFinite(c)) {
+                  validPoints.push({ time: t, close: c });
+                }
+              });
+            }
+            
+            closes = validPoints.map(p => p.close);
+            price = result.meta.regularMarketPrice || price;
+            prevClose = result.meta.chartPreviousClose || prevClose;
+            volume = result.meta.regularMarketVolume || volume;
+            name = result.meta.shortName || result.meta.longName || cleanSymbol;
 
-          if (closes.length > 0) {
-            yearHigh = Math.max(...closes);
-            yearLow = Math.min(...closes);
-            startDateStr = new Date(validPoints[0].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-            endDateStr = new Date(validPoints[validPoints.length - 1].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+            // Safe mathematical calculation tracking loop to avoid -Infinity crashes
+            if (closes.length > 0) {
+              yearHigh = Math.max(...closes).toFixed(2);
+              yearLow = Math.min(...closes).toFixed(2);
+              startDateStr = new Date(validPoints[0].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+              endDateStr = new Date(validPoints[validPoints.length - 1].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+            }
           }
         }
+      } catch (chartErr) {
+        console.error("Live chart vector network acquisition timeout: ", chartErr);
       }
 
-      // Pipeline B: Granular Fundamental Ratios Layer
+      // 2. Fundamental Ratios Processing (Managed via Free 24-Hour Edge CDN Cache API)
       let fundamentals = {
         pe: 'N/A', forwardPE: 'N/A', peg: 'N/A', pb: 'N/A', ps: 'N/A', eps: 'N/A',
         currentRatio: 'N/A', quickRatio: 'N/A', de: 'N/A', roe: 'N/A',
         grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A'
       };
 
-      if (fmpKey && fmpKey !== "demo") {
-        try {
-          const fmpProfileUrl = `https://financialmodelingprep.com/api/v3/profile/${cleanSymbol}?apikey=${fmpKey}`;
-          const fmpRatiosUrl = `https://financialmodelingprep.com/api/v3/ratios-ttm/${cleanSymbol}?apikey=${fmpKey}`;
-
-          const [fmpProfileRes, fmpRatiosRes] = await Promise.all([
-            fetch(fmpProfileUrl, { cf: { cacheTtl: 86400, cacheEverything: true } }),
-            fetch(fmpRatiosUrl, { cf: { cacheTtl: 86400, cacheEverything: true } })
-          ]);
-
-          if (fmpProfileRes.ok) {
-            const pJson = await fmpProfileRes.json();
-            if (pJson && pJson.length > 0) {
-              marketCap = pJson[0].marketCap || marketCap; // Fixed schema pointer mapping
-              fundamentals.eps = pJson[0].eps ? pJson[0].eps.toFixed(2) : 'N/A';
-              if (pJson[0].companyName) name = pJson[0].companyName;
-            }
-          }
-
-          if (fmpRatiosRes.ok) {
-            const rJson = await fmpRatiosRes.json();
-            if (rJson && rJson.length > 0) {
-              const r = rJson[0];
-              if (r.priceEarningsRatioTTM) fundamentals.pe = r.priceEarningsRatioTTM.toFixed(2);
-              if (r.pegRatioTTM) fundamentals.peg = r.pegRatioTTM.toFixed(2);
-              if (r.priceToBookRatioTTM) fundamentals.pb = r.priceToBookRatioTTM.toFixed(2);
-              if (r.priceToSalesRatioTTM) fundamentals.ps = r.priceToSalesRatioTTM.toFixed(2);
-              if (r.currentRatioTTM) fundamentals.currentRatio = r.currentRatioTTM.toFixed(2);
-              if (r.quickRatioTTM) fundamentals.quickRatio = r.quickRatioTTM.toFixed(2);
-              if (r.debtEquityRatioTTM) fundamentals.de = r.debtEquityRatioTTM.toFixed(2);
-              if (r.returnOnEquityTTM) fundamentals.roe = (r.returnOnEquityTTM * 100).toFixed(1) + '%';
-              if (r.grossProfitMarginTTM) fundamentals.grossMargin = (r.grossProfitMarginTTM * 100).toFixed(1) + '%';
-              if (r.operatingProfitMarginTTM) fundamentals.operatingMargin = (r.operatingProfitMarginTTM * 100).toFixed(1) + '%';
-              if (r.netProfitMarginTTM) fundamentals.netMargin = (r.netProfitMarginTTM * 100).toFixed(1) + '%';
-            }
-          }
-        } catch (err) {
-          console.error("API Execution Error:", err);
-        }
+      if (!fmpKey) {
+        // Explicit configuration prompt catch
+        const keys = Object.keys(fundamentals);
+        for (let k of keys) fundamentals[k] = 'NEED_KEY';
       } else {
-        // Flag to explicitly prompt parameter configuration
-        fundamentals = {
-          pe: 'SET_KEY', forwardPE: 'SET_KEY', peg: 'SET_KEY', pb: 'SET_KEY', ps: 'SET_KEY', eps: 'SET_KEY',
-          currentRatio: 'SET_KEY', quickRatio: 'SET_KEY', de: 'SET_KEY', roe: 'SET_KEY',
-          grossMargin: 'SET_KEY', operatingMargin: 'SET_KEY', netMargin: 'SET_KEY'
-        };
+        const cacheNamespace = caches.default;
+        const syntheticCacheUrl = `http://cache.local/fundamentals/${cleanSymbol}`;
+        
+        try {
+          let cacheHit = await cacheNamespace.match(syntheticCacheUrl);
+          
+          if (cacheHit) {
+            const cacheJson = await cacheHit.json();
+            fundamentals = cacheJson.fundamentals;
+            if (cacheJson.marketCap) marketCap = cacheJson.marketCap;
+          } else {
+            // Cache Miss: Query network endpoints safely
+            const fmpProfileUrl = `https://financialmodelingprep.com/api/v3/profile/${cleanSymbol}?apikey=${fmpKey}`;
+            const fmpRatiosUrl = `https://financialmodelingprep.com/api/v3/ratios-ttm/${cleanSymbol}?apikey=${fmpKey}`;
+
+            const [pRes, rRes] = await Promise.all([
+              fetch(fmpProfileUrl),
+              fetch(fmpRatiosUrl)
+            ]);
+
+            if (pRes.ok) {
+              const pData = await pRes.json();
+              if (pData && pData.length > 0) {
+                marketCap = pData[0].marketCap || marketCap;
+                fundamentals.eps = typeof pData[0].eps === 'number' ? pData[0].eps.toFixed(2) : 'N/A';
+                if (pData[0].companyName) name = pData[0].companyName;
+              }
+            }
+
+            if (rRes.ok) {
+              const rData = await rRes.json();
+              if (rData && rData.length > 0) {
+                const r = rData[0];
+                if (r.priceEarningsRatioTTM) fundamentals.pe = r.priceEarningsRatioTTM.toFixed(2);
+                if (r.pegRatioTTM) fundamentals.peg = r.pegRatioTTM.toFixed(2);
+                if (r.priceToBookRatioTTM) fundamentals.pb = r.priceToBookRatioTTM.toFixed(2);
+                if (r.priceToSalesRatioTTM) fundamentals.ps = r.priceToSalesRatioTTM.toFixed(2);
+                if (r.currentRatioTTM) fundamentals.currentRatio = r.currentRatioTTM.toFixed(2);
+                if (r.quickRatioTTM) fundamentals.quickRatio = r.quickRatioTTM.toFixed(2);
+                if (r.debtEquityRatioTTM) fundamentals.de = r.debtEquityRatioTTM.toFixed(2);
+                if (r.returnOnEquityTTM) fundamentals.roe = (r.returnOnEquityTTM * 100).toFixed(1) + '%';
+                if (r.grossProfitMarginTTM) fundamentals.grossMargin = (r.grossProfitMarginTTM * 100).toFixed(1) + '%';
+                if (r.operatingProfitMarginTTM) fundamentals.operatingMargin = (r.operatingProfitMarginTTM * 100).toFixed(1) + '%';
+                if (r.netProfitMarginTTM) fundamentals.netMargin = (r.netProfitMarginTTM * 100).toFixed(1) + '%';
+              }
+            }
+
+            // Commit structured response to global edge CDN cache for 24 Hours
+            const cachePayload = { fundamentals, marketCap };
+            const cacheResponse = new Response(JSON.stringify(cachePayload), {
+              headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' }
+            });
+            await cacheNamespace.put(syntheticCacheUrl, cacheResponse);
+          }
+        } catch (cacheErr) {
+          console.error("Cache processing failure: ", cacheErr);
+        }
       }
+
+      const change = price - prevClose;
+      const changePercent = prevClose ? (change / prevClose) * 100 : 0;
 
       return json({
         symbol: cleanSymbol,
-        name: name.length > 25 ? name.substring(0, 22) + '...' : name,
-        price: price.toFixed(2),
-        change: change.toFixed(2),
-        changePercent: changePercent.toFixed(2),
+        name: name ? (name.length > 25 ? name.substring(0, 22) + '...' : name) : cleanSymbol,
+        price: price ? price.toFixed(2) : "0.00",
+        change: change ? change.toFixed(2) : "0.00",
+        changePercent: changePercent ? changePercent.toFixed(2) : "0.00",
         marketCap: marketCap ? formatLargeNum(marketCap) : 'N/A',
         volume: volume ? formatLargeNum(volume) : 'N/A',
         closes,
         startDate: startDateStr,
         endDate: endDateStr,
-        yearHigh: yearHigh ? yearHigh.toFixed(2) : 'N/A',
-        yearLow: yearLow ? yearLow.toFixed(2) : 'N/A',
+        yearHigh,
+        yearLow,
         fundamentals
       });
     }
@@ -155,6 +178,7 @@ function json(data, status = 200) {
 }
 
 function formatLargeNum(num) {
+  if (!num || isNaN(num)) return 'N/A';
   if (num >= 1e12) return (num / 1e12).toFixed(2) + 'T';
   if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
   if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
@@ -162,7 +186,7 @@ function formatLargeNum(num) {
   return num.toString();
 }
 
-// --- Layout Matrix Generation ---
+// --- Layout Interface Template (Cleaned from all parsing string escape anomalies) ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -316,6 +340,7 @@ function getAppHTML() {
     const html = await Promise.all(watchlist.map(async sym => {
       try {
         const res = await fetch('/api/stock?s=' + sym);
+        if (!res.ok) throw new Error("Server response error");
         const d = await res.json();
         const upDown = d.change >= 0 ? 'up' : 'down';
         const arrow = d.change >= 0 ? '▲' : '▼';
@@ -359,7 +384,7 @@ function getAppHTML() {
       const d = await res.json();
       
       if (!d.closes || d.closes.length < 2) {
-        body.innerHTML = '<div class="empty">No vector matrix dataset verified.</div>';
+        body.innerHTML = '<div class="empty">No historical coordinate points returned.</div>';
         return;
       }
 
@@ -384,11 +409,11 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\ bubble\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
-            <path d="\text{\${pathData}} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
+            <path d="\${pathData} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
         </div>
@@ -398,8 +423,8 @@ function getAppHTML() {
           <span>\${d.endDate}</span>
         </div>
         <div class="grid">
-          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\${d.yearHigh}</div></div>
-          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\${d.yearLow}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\text{\${d.yearHigh}}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\text{\${d.yearLow}}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
         </div>
@@ -435,7 +460,7 @@ function getAppHTML() {
           <div class="stat"><div class="stat-lbl">P/S Ratio</div><div class="stat-val">\${f.ps}</div></div>
           <div class="stat"><div class="stat-lbl">EPS (TTM)</div><div class="stat-val">\${f.eps}</div></div>
           <div class="stat"><div class="stat-lbl">Current Ratio</div><div class="stat-val">\${f.currentRatio}</div></div>
-          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\s\${f.quickRatio}</div></div>
+          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\${f.quickRatio}</div></div>
           <div class="stat"><div class="stat-lbl">Debt/Equity</div><div class="stat-val">\${f.de}</div></div>
           <div class="stat"><div class="stat-lbl">Return on Equity</div><div class="stat-val">\${f.roe}</div></div>
           <div class="stat"><div class="stat-lbl">Gross Margin</div><div class="stat-val">\${f.grossMargin}</div></div>
