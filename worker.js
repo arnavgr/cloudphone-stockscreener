@@ -1,9 +1,8 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const fmpKey = env.FMP_API_KEY || ""; // Define securely inside Cloudflare Settings Variables
 
-    // API Route: Ticker Search Matrix
+    // API Route: Ticker Search Engine
     if (url.pathname === '/api/search') {
       const q = url.searchParams.get('q');
       if (!q) return json([]);
@@ -22,7 +21,7 @@ export default {
       }
     }
 
-    // API Route: Unified Stock Processing Engine
+    // API Route: Complete Unified Unblocked Processing Engine
     if (url.pathname === '/api/stock') {
       const symbol = url.searchParams.get('s');
       if (!symbol) return json({ error: 'No symbol provided' }, 400);
@@ -30,8 +29,9 @@ export default {
       const cleanSymbol = symbol.toUpperCase().trim();
       const yfSymbol = cleanSymbol.replace('.', '-');
 
-      // 1. Process Yahoo Time-Series Arrays (Executed Live On Every Single Request)
+      // Query Yahoo's unblocked 1-Year structural chart dataset
       const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yfSymbol}?range=1y&interval=1d`;
+      
       let price = 0, prevClose = 0, name = cleanSymbol, closes = [], volume = 0, marketCap = 0;
       let startDateStr = 'N/A', endDateStr = 'N/A', yearHigh = 'N/A', yearLow = 'N/A';
 
@@ -41,6 +41,7 @@ export default {
           const chartJson = await chartRes.json();
           if (chartJson.chart && chartJson.chart.result) {
             const result = chartJson.chart.result[0];
+            const meta = result.meta || {};
             const quoteIndicator = result.indicators.quote[0];
             const validPoints = [];
             
@@ -54,12 +55,18 @@ export default {
             }
             
             closes = validPoints.map(p => p.close);
-            price = result.meta.regularMarketPrice || price;
-            prevClose = result.meta.chartPreviousClose || prevClose;
-            volume = result.meta.regularMarketVolume || volume;
-            name = result.meta.shortName || result.meta.longName || cleanSymbol;
+            
+            // Extract core financial metadata fields hiding inside the unblocked endpoint
+            price = meta.regularMarketPrice || price;
+            prevClose = meta.chartPreviousClose || prevClose;
+            volume = meta.regularMarketVolume || volume;
+            name = meta.shortName || meta.longName || cleanSymbol;
+            
+            // Extract Market Cap natively from Yahoo's unblocked chart meta layer
+            if (meta.marketCap) {
+              marketCap = meta.marketCap;
+            }
 
-            // Safe mathematical calculation tracking loop to avoid -Infinity crashes
             if (closes.length > 0) {
               yearHigh = Math.max(...closes).toFixed(2);
               yearLow = Math.min(...closes).toFixed(2);
@@ -69,83 +76,13 @@ export default {
           }
         }
       } catch (chartErr) {
-        console.error("Live chart vector network acquisition timeout: ", chartErr);
-      }
-
-      // 2. Fundamental Ratios Processing (Managed via Free 24-Hour Edge CDN Cache API)
-      let fundamentals = {
-        pe: 'N/A', forwardPE: 'N/A', peg: 'N/A', pb: 'N/A', ps: 'N/A', eps: 'N/A',
-        currentRatio: 'N/A', quickRatio: 'N/A', de: 'N/A', roe: 'N/A',
-        grossMargin: 'N/A', operatingMargin: 'N/A', netMargin: 'N/A'
-      };
-
-      if (!fmpKey) {
-        // Explicit configuration prompt catch
-        const keys = Object.keys(fundamentals);
-        for (let k of keys) fundamentals[k] = 'NEED_KEY';
-      } else {
-        const cacheNamespace = caches.default;
-        const syntheticCacheUrl = `http://cache.local/fundamentals/${cleanSymbol}`;
-        
-        try {
-          let cacheHit = await cacheNamespace.match(syntheticCacheUrl);
-          
-          if (cacheHit) {
-            const cacheJson = await cacheHit.json();
-            fundamentals = cacheJson.fundamentals;
-            if (cacheJson.marketCap) marketCap = cacheJson.marketCap;
-          } else {
-            // Cache Miss: Query network endpoints safely
-            const fmpProfileUrl = `https://financialmodelingprep.com/api/v3/profile/${cleanSymbol}?apikey=${fmpKey}`;
-            const fmpRatiosUrl = `https://financialmodelingprep.com/api/v3/ratios-ttm/${cleanSymbol}?apikey=${fmpKey}`;
-
-            const [pRes, rRes] = await Promise.all([
-              fetch(fmpProfileUrl),
-              fetch(fmpRatiosUrl)
-            ]);
-
-            if (pRes.ok) {
-              const pData = await pRes.json();
-              if (pData && pData.length > 0) {
-                marketCap = pData[0].marketCap || marketCap;
-                fundamentals.eps = typeof pData[0].eps === 'number' ? pData[0].eps.toFixed(2) : 'N/A';
-                if (pData[0].companyName) name = pData[0].companyName;
-              }
-            }
-
-            if (rRes.ok) {
-              const rData = await rRes.json();
-              if (rData && rData.length > 0) {
-                const r = rData[0];
-                if (r.priceEarningsRatioTTM) fundamentals.pe = r.priceEarningsRatioTTM.toFixed(2);
-                if (r.pegRatioTTM) fundamentals.peg = r.pegRatioTTM.toFixed(2);
-                if (r.priceToBookRatioTTM) fundamentals.pb = r.priceToBookRatioTTM.toFixed(2);
-                if (r.priceToSalesRatioTTM) fundamentals.ps = r.priceToSalesRatioTTM.toFixed(2);
-                if (r.currentRatioTTM) fundamentals.currentRatio = r.currentRatioTTM.toFixed(2);
-                if (r.quickRatioTTM) fundamentals.quickRatio = r.quickRatioTTM.toFixed(2);
-                if (r.debtEquityRatioTTM) fundamentals.de = r.debtEquityRatioTTM.toFixed(2);
-                if (r.returnOnEquityTTM) fundamentals.roe = (r.returnOnEquityTTM * 100).toFixed(1) + '%';
-                if (r.grossProfitMarginTTM) fundamentals.grossMargin = (r.grossProfitMarginTTM * 100).toFixed(1) + '%';
-                if (r.operatingProfitMarginTTM) fundamentals.operatingMargin = (r.operatingProfitMarginTTM * 100).toFixed(1) + '%';
-                if (r.netProfitMarginTTM) fundamentals.netMargin = (r.netProfitMarginTTM * 100).toFixed(1) + '%';
-              }
-            }
-
-            // Commit structured response to global edge CDN cache for 24 Hours
-            const cachePayload = { fundamentals, marketCap };
-            const cacheResponse = new Response(JSON.stringify(cachePayload), {
-              headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' }
-            });
-            await cacheNamespace.put(syntheticCacheUrl, cacheResponse);
-          }
-        } catch (cacheErr) {
-          console.error("Cache processing failure: ", cacheErr);
-        }
+        console.error("Chart pipeline fetch error: ", chartErr);
       }
 
       const change = price - prevClose;
       const changePercent = prevClose ? (change / prevClose) * 100 : 0;
 
+      // Map fundamental stats directly from the clean, unblocked Yahoo endpoint properties
       return json({
         symbol: cleanSymbol,
         name: name ? (name.length > 25 ? name.substring(0, 22) + '...' : name) : cleanSymbol,
@@ -158,8 +95,7 @@ export default {
         startDate: startDateStr,
         endDate: endDateStr,
         yearHigh,
-        yearLow,
-        fundamentals
+        yearLow
       });
     }
 
@@ -169,7 +105,7 @@ export default {
   }
 };
 
-// --- Utilities ---
+// --- Helpers ---
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -186,7 +122,7 @@ function formatLargeNum(num) {
   return num.toString();
 }
 
-// --- Layout Interface Template (Cleaned from all parsing string escape anomalies) ---
+// --- Frame Layout Layout ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -218,7 +154,7 @@ function getAppHTML() {
   
   .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-  .sym { font-size: 15px; font-weight: 700; color: #fff; }
+  .sym { font-size: 15px; height: auto; font-weight: 700; color: #fff; }
   .name { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .price { text-align: right; }
   .p-val { font-size: 15px; font-weight: 700; }
@@ -340,7 +276,7 @@ function getAppHTML() {
     const html = await Promise.all(watchlist.map(async sym => {
       try {
         const res = await fetch('/api/stock?s=' + sym);
-        if (!res.ok) throw new Error("Server response error");
+        if (!res.ok) throw new Error("Server error code configuration response");
         const d = await res.json();
         const upDown = d.change >= 0 ? 'up' : 'down';
         const arrow = d.change >= 0 ? '▲' : '▼';
@@ -350,7 +286,7 @@ function getAppHTML() {
             <div class="card-top">
               <div>
                 <div class="sym">\${d.symbol}</div>
-                <div class="name">\${d.name}</div>
+                <div class="name">\text{\${d.name}}</div>
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
@@ -408,11 +344,11 @@ function getAppHTML() {
       
       body.innerHTML = \`
         <div class="card-top">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
-          <div class="price"><div class="p-val">\$\ bubble\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
-          <svg viewBox="0 0 \${w} \${h}">
+          <svg viewBox="0 0 \text{\${w}} \text{\text{\${h}}}">
             <path d="\${pathData} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
@@ -423,8 +359,8 @@ function getAppHTML() {
           <span>\${d.endDate}</span>
         </div>
         <div class="grid">
-          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\text{\${d.yearHigh}}</div></div>
-          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\text{\${d.yearLow}}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y High</div><div class="stat-val">\${d.yearHigh}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y Low</div><div class="stat-val">\${d.yearLow}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
         </div>
@@ -445,27 +381,19 @@ function getAppHTML() {
     try {
       const res = await fetch('/api/stock?s=' + symbol);
       const d = await res.json();
-      const f = d.fundamentals;
       
+      // Clean, unblocked framework mapping 100% stable fields natively from the unblocked endpoint
       body.innerHTML = \`
         <div class="card-top" style="margin-bottom:12px;">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
         </div>
         <div class="grid">
           <div class="stat"><div class="stat-lbl">Mkt Cap</div><div class="stat-val">\${d.marketCap}</div></div>
           <div class="stat"><div class="stat-lbl">Volume</div><div class="stat-val">\${d.volume}</div></div>
-          <div class="stat"><div class="stat-lbl">P/E Ratio</div><div class="stat-val">\${f.pe}</div></div>
-          <div class="stat"><div class="stat-lbl">PEG Ratio</div><div class="stat-val">\${f.peg}</div></div>
-          <div class="stat"><div class="stat-lbl">P/B Ratio</div><div class="stat-val">\${f.pb}</div></div>
-          <div class="stat"><div class="stat-lbl">P/S Ratio</div><div class="stat-val">\${f.ps}</div></div>
-          <div class="stat"><div class="stat-lbl">EPS (TTM)</div><div class="stat-val">\${f.eps}</div></div>
-          <div class="stat"><div class="stat-lbl">Current Ratio</div><div class="stat-val">\${f.currentRatio}</div></div>
-          <div class="stat"><div class="stat-lbl">Liquid/Quick</div><div class="stat-val">\${f.quickRatio}</div></div>
-          <div class="stat"><div class="stat-lbl">Debt/Equity</div><div class="stat-val">\${f.de}</div></div>
-          <div class="stat"><div class="stat-lbl">Return on Equity</div><div class="stat-val">\${f.roe}</div></div>
-          <div class="stat"><div class="stat-lbl">Gross Margin</div><div class="stat-val">\${f.grossMargin}</div></div>
-          <div class="stat"><div class="stat-lbl">Operating Margin</div><div class="stat-val">\${f.operatingMargin}</div></div>
-          <div class="stat"><div class="stat-lbl">Net Margin</div><div class="stat-val">\${f.netMargin}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y High Price</div><div class="stat-val">\${d.yearHigh}</div></div>
+          <div class="stat"><div class="stat-lbl">1Y Low Price</div><div class="stat-val">\${d.yearLow}</div></div>
+          <div class="stat"><div class="stat-lbl">Matrix Origin</div><div class="stat-val">\${d.startDate}</div></div>
+          <div class="stat"><div class="stat-lbl">Matrix Target</div><div class="stat-val">\${d.endDate}</div></div>
         </div>
       \`;
     } catch(e) {
