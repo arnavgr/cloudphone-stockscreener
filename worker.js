@@ -171,7 +171,7 @@ async function fetchChartData(cleanSymbol) {
 
   return {
     symbol: cleanSymbol,
-    name: name ? (name.length > 25 ? name.substring(0, 22) + '...' : name) : cleanSymbol,
+    name: name ? (name.length > 25 ? name.substring(0, 22) + '...') : name,
     price: price ? price.toFixed(2) : '0.00',
     change: change ? change.toFixed(2) : '0.00',
     changePercent: changePercent ? changePercent.toFixed(2) : '0.00',
@@ -185,7 +185,7 @@ async function fetchChartData(cleanSymbol) {
   };
 }
 
-// --- Fundamentals Engine (Extensive Finnhub API Adaptation Pipeline) ---
+// --- Fundamentals Engine (Pruned for Free-Tier Execution) ---
 function mVal(metric, ...candidates) {
   for (const key of candidates) {
     const v = metric[key];
@@ -202,11 +202,11 @@ async function fetchFundamentals(cleanSymbol, env) {
   const token = encodeURIComponent(apiKey);
 
   try {
-    const [profileRes, metricRes, recRes, ptRes] = await Promise.allSettled([
+    // Stripped out premium endpoints (price-target) to preserve latency and avoid 403 blocks
+    const [profileRes, metricRes, recRes] = await Promise.allSettled([
       fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${sym}&token=${token}`),
       fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${sym}&metric=all&token=${token}`),
-      fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${sym}&token=${token}`),
-      fetch(`https://finnhub.io/api/v1/stock/price-target?symbol=${sym}&token=${token}`)
+      fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${sym}&token=${token}`)
     ]);
 
     if (profileRes.status !== 'fulfilled' || !profileRes.value.ok || metricRes.status !== 'fulfilled' || !metricRes.value.ok) {
@@ -219,21 +219,15 @@ async function fetchFundamentals(cleanSymbol, env) {
 
     if (!profile || !profile.name) return { available: false };
 
-    let recommendation = null, priceTarget = null;
+    let recommendation = null;
     if (recRes.status === 'fulfilled' && recRes.value.ok) {
       const recArr = await recRes.value.json();
       if (Array.isArray(recArr) && recArr.length > 0) recommendation = recArr[0];
-    }
-    if (ptRes.status === 'fulfilled' && ptRes.value.ok) {
-      const ptData = await ptRes.value.json();
-      if (ptData && (ptData.targetMean || ptData.targetHigh)) priceTarget = ptData;
     }
 
     const marketCapM = typeof profile.marketCapitalization === 'number' ? profile.marketCapitalization : null;
     const sharesOutM = typeof profile.shareOutstanding === 'number' ? profile.shareOutstanding : null;
 
-    // Note: Finnhub metrics values inside raw JSON response payloads are already scaled by 100 (e.g. roeTTM: 15.4 means 15.4%). 
-    // We pass them to our existing pct framework divider safely.
     const pctMap = (key) => {
       const v = mVal(metric, key);
       return v !== null ? v / 100 : null;
@@ -245,20 +239,16 @@ async function fetchFundamentals(cleanSymbol, env) {
         marketCap: marketCapM !== null ? formatLargeNum(marketCapM * 1e6) : 'N/A',
         peTrailing: fmtNum(mVal(metric, 'peTTM', 'peBasicExclExtraTTM', 'peExclExtraTTM', 'peNormalizedAnnual')),
         peForward: fmtNum(mVal(metric, 'forwardPE')),
-        peg: fmtNum(mVal(metric, 'pegRatioTTM', 'pegRatio')),
         priceToBook: fmtNum(mVal(metric, 'pb', 'pbQuarterly', 'pbAnnual')),
-        priceToSales: fmtNum(mVal(metric, 'psTTM', 'psAnnual', 'ps')),
-        evToRevenue: fmtNum(mVal(metric, 'ev/revenueQuarterly', 'ev/revenueAnnual', 'evToRevenue')),
-        evToEbitda: fmtNum(mVal(metric, 'ev/ebitdaQuarterly', 'ev/ebitdaAnnual', 'evToEbitda'))
+        priceToSales: fmtNum(mVal(metric, 'psTTM', 'psAnnual', 'ps'))
       },
       perShare: {
         eps: fmtNum(mVal(metric, 'epsBasicExclExtraItemsTTM', 'epsTTM', 'epsAnnual')),
-        dilutedEps: fmtNum(mVal(metric, 'epsDilutedTTM', 'epsDilutedAnnual')),
         bookValue: fmtNum(mVal(metric, 'bookValuePerShareQuarterly', 'bookValuePerShareAnnual', 'bookValue')),
         revenuePerShare: fmtNum(mVal(metric, 'revenuePerShareTTM', 'salesPerShare'))
       },
       profitability: {
-        grossProfit: 'N/A', // Omitted from Finnhub basic metric array block
+        grossMargin: fmtPct(pctMap('grossMarginTTM')),
         profitMargin: fmtPct(pctMap('netProfitMarginTTM')),
         operatingMargin: fmtPct(pctMap('operatingMarginTTM')),
         roe: fmtPct(pctMap('roeTTM')),
@@ -270,27 +260,21 @@ async function fetchFundamentals(cleanSymbol, env) {
       },
       dividends: {
         yield: fmtDividendYield((mVal(metric, 'dividendYieldIndicatedAnnual', 'currentDividendYieldTTM') || 0) / 100),
-        perShare: fmtNum(mVal(metric, 'dividendPerShareAnnual', 'dividendPerShareTTM')),
-        forwardRate: fmtNum(mVal(metric, 'dividendRateIndicatedAnnual')),
-        exDividendDate: 'N/A'
+        perShare: fmtNum(mVal(metric, 'dividendPerShareAnnual', 'dividendPerShareTTM'))
       },
       trading: {
         beta: fmtNum(mVal(metric, 'beta')),
         fiftyTwoWeekHigh: fmtNum(mVal(metric, '52WeekHigh')),
         fiftyTwoWeekLow: fmtNum(mVal(metric, '52WeekLow')),
-        fiftyDayAvg: fmtNum(mVal(metric, '50DayMovingAverage')),
-        twoHundredDayAvg: fmtNum(mVal(metric, '200DayMovingAverage')),
-        sharesOutstanding: sharesOutM !== null ? formatLargeNum(sharesOutM * 1e6) : 'N/A',
-        sharesFloat: 'N/A'
+        sharesOutstanding: sharesOutM !== null ? formatLargeNum(sharesOutM * 1e6) : 'N/A'
       },
-      ownership: {
-        percentInsiders: 'N/A',
-        percentInstitutions: 'N/A',
-        shortRatio: 'N/A',
-        shortPercentFloat: 'N/A'
+      financialHealth: {
+        debtToEquity: fmtNum(mVal(metric, 'totalDebtToEquity', 'totalDebt/totalEquityQuarterly', 'totalDebt/totalEquityAnnual')),
+        currentRatio: fmtNum(mVal(metric, 'currentRatio', 'currentRatioQuarterly', 'currentRatioAnnual')),
+        quickRatio: fmtNum(mVal(metric, 'quickRatio', 'quickRatioQuarterly', 'quickRatioAnnual')),
+        cashRatio: fmtNum(mVal(metric, 'cashRatio', 'cashRatioQuarterly', 'cashRatioAnnual'))
       },
       analyst: {
-        targetPrice: (priceTarget && fmtNum(priceTarget.targetMean)) || 'N/A',
         strongBuy: recommendation ? String(recommendation.strongBuy) : 'N/A',
         buy: recommendation ? String(recommendation.buy) : 'N/A',
         hold: recommendation ? String(recommendation.hold) : 'N/A',
@@ -301,7 +285,7 @@ async function fetchFundamentals(cleanSymbol, env) {
         sector: profile.finnhubIndustry || 'N/A',
         industry: profile.finnhubIndustry || 'N/A',
         exchange: profile.exchange || 'N/A',
-        employees: profile.employeeTotal ? profile.employeeTotal.toLocaleString('en-US') : 'N/A'
+        country: profile.country || 'N/A'
       }
     };
   } catch (e) {
@@ -310,7 +294,7 @@ async function fetchFundamentals(cleanSymbol, env) {
   }
 }
 
-// --- Frame UI Matrix Layout (100% Retained Structure Configuration) ---
+// --- Frame UI Matrix Layout (Optimized specifically for working Free Tier variables) ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -366,8 +350,6 @@ function getAppHTML() {
   .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; }
   .stat-val { font-size: 12px; font-weight: 600; margin-top: 2px; }
   .stat-val.na { color: var(--muted); font-weight: 400; }
-  .stat-val.pos { color: var(--up); }
-  .stat-val.neg { color: var(--down); }
 
   .fund-section-title { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
   .fund-section-title:first-of-type { margin-top: 0; }
@@ -485,7 +467,7 @@ function getAppHTML() {
             <div class="card-top">
               <div>
                 <div class="sym">\${d.symbol}</div>
-                <div class="name">\text{\${d.name}}</div>
+                <div class="name">\${d.name}</div>
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
@@ -531,6 +513,7 @@ function getAppHTML() {
       ]);
       const d = await stockRes.json();
       let marketCap = d.marketCap;
+      
       if (fundRes && fundRes.ok) {
         const f = await fundRes.json();
         if (f.available && f.valuation && f.valuation.marketCap !== 'N/A') {
@@ -564,7 +547,7 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \text{\${d.change >= 0 ? 'up' : 'down'}}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
@@ -615,7 +598,7 @@ function getAppHTML() {
       if (!f.available) {
         html += \`
           <div class="fund-unavailable">
-            Deep fundamentals are temporarily unavailable (data feed quota or lookup issue).<br>
+            Deep fundamentals are temporarily unavailable (API configuration required or stock not supported).<br>
             Price, volume and 1Y range below still come from the live chart feed.
           </div>
           <div class="fund-section-title">Trading Range</div>
@@ -630,8 +613,16 @@ function getAppHTML() {
         return;
       }
 
-      const v = f.valuation, ps = f.perShare, pr = f.profitability, g = f.growth,
-            dv = f.dividends, tr = f.trading, ow = f.ownership, an = f.analyst, co = f.company;
+      // Stripped dead blocks (Ownership, Peg, EV Ratios, Target Price)
+      const v = f.valuation || {};
+      const ps = f.perShare || {};
+      const pr = f.profitability || {};
+      const g = f.growth || {};
+      const dv = f.dividends || {};
+      const tr = f.trading || {};
+      const an = f.analyst || {};
+      const co = f.company || {};
+      const fh = f.financialHealth || {}; 
 
       html += \`
         <div class="fund-section-title">Valuation</div>
@@ -639,26 +630,22 @@ function getAppHTML() {
           \${statBox('Mkt Cap', v.marketCap)}
           \${statBox('P/E (TTM)', v.peTrailing)}
           \${statBox('P/E (Fwd)', v.peForward)}
-          \${statBox('PEG Ratio', v.peg)}
           \${statBox('Price/Book', v.priceToBook)}
           \${statBox('Price/Sales', v.priceToSales)}
-          \${statBox('EV/Revenue', v.evToRevenue)}
-          \${statBox('EV/EBITDA', v.evToEbitda)}
         </div>
 
         <div class="fund-section-title">Per Share</div>
         <div class="grid">
           \${statBox('EPS', ps.eps)}
-          \${statBox('Diluted EPS', ps.dilutedEps)}
           \${statBox('Book Value', ps.bookValue)}
           \${statBox('Revenue/Shr', ps.revenuePerShare)}
         </div>
 
         <div class="fund-section-title">Profitability</div>
         <div class="grid">
-          \${statBox('Gross Profit', pr.grossProfit)}
-          \${statBox('Profit Margin', pr.profitMargin)}
+          \${statBox('Gross Margin', pr.grossMargin)}
           \${statBox('Oper. Margin', pr.operatingMargin)}
+          \${statBox('Net Margin', pr.profitMargin)}
           \${statBox('ROE', pr.roe)}
           \${statBox('ROA', pr.roa)}
         </div>
@@ -673,8 +660,14 @@ function getAppHTML() {
         <div class="grid">
           \${statBox('Yield', dv.yield)}
           \${statBox('Per Share', dv.perShare)}
-          \${statBox('Fwd Annual Rate', dv.forwardRate)}
-          \${statBox('Ex-Div Date', dv.exDividendDate)}
+        </div>
+
+        <div class="fund-section-title">Financial Health</div>
+        <div class="grid">
+          \${statBox('Debt/Equity', fh.debtToEquity)}
+          \${statBox('Current Ratio', fh.currentRatio)}
+          \${statBox('Quick Ratio', fh.quickRatio)}
+          \${statBox('Cash Ratio', fh.cashRatio)}
         </div>
 
         <div class="fund-section-title">Trading Stats</div>
@@ -682,23 +675,11 @@ function getAppHTML() {
           \${statBox('Beta', tr.beta)}
           \${statBox('52W High', tr.fiftyTwoWeekHigh)}
           \${statBox('52W Low', tr.fiftyTwoWeekLow)}
-          \${statBox('50D Avg', tr.fiftyDayAvg)}
-          \${statBox('200D Avg', tr.twoHundredDayAvg)}
           \${statBox('Shares Out', tr.sharesOutstanding)}
-          \${statBox('Shares Float', tr.sharesFloat)}
         </div>
 
-        <div class="fund-section-title">Ownership &amp; Short Interest</div>
+        <div class="fund-section-title">Analyst Ratings</div>
         <div class="grid">
-          \${statBox('% Insiders', ow.percentInsiders)}
-          \${statBox('% Institutions', ow.percentInstitutions)}
-          \${statBox('Short Ratio', ow.shortRatio)}
-          \${statBox('Short % Float', ow.shortPercentFloat)}
-        </div>
-
-        <div class="fund-section-title">Analyst Views</div>
-        <div class="grid">
-          \${statBox('Target Price', an.targetPrice)}
           \${statBox('Strong Buy', an.strongBuy)}
           \${statBox('Buy', an.buy)}
           \${statBox('Hold', an.hold)}
@@ -711,7 +692,7 @@ function getAppHTML() {
           \${infoRow('Sector', co.sector)}
           \${infoRow('Industry', co.industry)}
           \${infoRow('Exchange', co.exchange)}
-          \${infoRow('Employees', co.employees)}
+          \${infoRow('Country', co.country)}
         </div>
       \`;
 
