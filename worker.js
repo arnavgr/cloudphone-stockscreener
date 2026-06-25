@@ -21,7 +21,7 @@ export default {
       }
     }
 
-    // API Route: Price + 1Y chart (Live Yahoo Processing Layer)
+    // API Route: Price + 1Y chart (Live via Yahoo)
     if (url.pathname === '/api/stock') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
@@ -38,7 +38,7 @@ export default {
       return resp;
     }
 
-    // API Route: Deep fundamentals - Finnhub Core Framework (KV Cached 24 Hours)
+    // API Route: Deep fundamentals - Finnhub (Cached in KV for 24h)
     if (url.pathname === '/api/fundamentals') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
@@ -51,7 +51,7 @@ export default {
           const cachedStr = await kv.get(kvKey);
           if (cachedStr) return json(JSON.parse(cachedStr));
         } catch (e) {
-          console.error('KV database read exception tracking payload: ', e);
+          console.error('KV read error: ', e);
         }
       }
 
@@ -60,7 +60,7 @@ export default {
 
       if (kv && data.available) {
         if (ctx && ctx.waitUntil) {
-          ctx.waitUntil(kv.put(kvKey, JSON.stringify(payload), { expirationTtl: 86400 }).catch(e => console.error('KV cache write exception: ', e)));
+          ctx.waitUntil(kv.put(kvKey, JSON.stringify(payload), { expirationTtl: 86400 }).catch(e => console.error('KV write error: ', e)));
         }
       }
 
@@ -73,10 +73,10 @@ export default {
   }
 };
 
-// --- Config Configuration Setup ---
+// --- Shared config ---
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// --- Global Context Formatter Core Matrix Helpers ---
+// --- Helpers ---
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -119,7 +119,7 @@ function fmtDividendYield(fraction) {
   return pct.toFixed(2) + '%';
 }
 
-// --- Chart Data Engine (Unmodified Yahoo Finance v8 Logic) ---
+// --- Chart + price data (Yahoo's unauthenticated v8 chart endpoint) ---
 async function fetchChartData(cleanSymbol) {
   const yfSymbol = cleanSymbol.replace('.', '-');
   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1y&interval=1d`;
@@ -147,6 +147,7 @@ async function fetchChartData(cleanSymbol) {
         }
 
         closes = validPoints.map(p => p.close);
+
         price = meta.regularMarketPrice || price;
         prevClose = meta.chartPreviousClose || prevClose;
         volume = meta.regularMarketVolume || volume;
@@ -171,7 +172,7 @@ async function fetchChartData(cleanSymbol) {
 
   return {
     symbol: cleanSymbol,
-    name: name ? (name.length > 25 ? name.substring(0, 22) + '...') : name,
+    name: (name && name.length > 25) ? (name.substring(0, 22) + '...') : (name || cleanSymbol),
     price: price ? price.toFixed(2) : '0.00',
     change: change ? change.toFixed(2) : '0.00',
     changePercent: changePercent ? changePercent.toFixed(2) : '0.00',
@@ -185,7 +186,7 @@ async function fetchChartData(cleanSymbol) {
   };
 }
 
-// --- Fundamentals Engine (Pruned for Free-Tier Execution) ---
+// --- Fundamentals (Finnhub Migration) ---
 function mVal(metric, ...candidates) {
   for (const key of candidates) {
     const v = metric[key];
@@ -202,35 +203,33 @@ async function fetchFundamentals(cleanSymbol, env) {
   const token = encodeURIComponent(apiKey);
 
   try {
-    const [profileRes, metricRes, recRes] = await Promise.allSettled([
+    const [profileRes, metricRes] = await Promise.all([
       fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${sym}&token=${token}`),
-      fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${sym}&metric=all&token=${token}`),
-      fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${sym}&token=${token}`)
+      fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${sym}&metric=all&token=${token}`)
     ]);
 
-    if (profileRes.status !== 'fulfilled' || !profileRes.value.ok || metricRes.status !== 'fulfilled' || !metricRes.value.ok) {
-      return { available: false };
-    }
+    if (!profileRes.ok || !metricRes.ok) return { available: false };
 
-    const profile = await profileRes.value.json();
-    const metricBody = await metricRes.value.json();
+    const profile = await profileRes.json();
+    const metricBody = await metricRes.json();
     const metric = (metricBody && metricBody.metric) || {};
 
     if (!profile || !profile.name) return { available: false };
 
     let recommendation = null;
-    if (recRes.status === 'fulfilled' && recRes.value.ok) {
-      const recArr = await recRes.value.json();
-      if (Array.isArray(recArr) && recArr.length > 0) recommendation = recArr[0];
+    try {
+      const recRes = await fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${sym}&token=${token}`);
+      if (recRes.ok) {
+        const recArr = await recRes.json();
+        if (Array.isArray(recArr) && recArr.length > 0) recommendation = recArr[0];
+      }
+    } catch (e) {
+      console.error('Analyst data fetch error: ', e);
     }
 
+    // Finnhub returns Market Cap and Shares Outstanding in Millions
     const marketCapM = typeof profile.marketCapitalization === 'number' ? profile.marketCapitalization : null;
     const sharesOutM = typeof profile.shareOutstanding === 'number' ? profile.shareOutstanding : null;
-
-    const pctMap = (key) => {
-      const v = mVal(metric, key);
-      return v !== null ? v / 100 : null;
-    };
 
     return {
       available: true,
@@ -247,6 +246,7 @@ async function fetchFundamentals(cleanSymbol, env) {
         revenuePerShare: fmtNum(mVal(metric, 'revenuePerShareTTM'))
       },
       profitability: {
+        // Finnhub provides margins already as scaled percentages (e.g. 15.5 for 15.5%), so we divide by 100 for fmtPct
         profitMargin: fmtPct(mVal(metric, 'netProfitMarginTTM') / 100),
         operatingMargin: fmtPct(mVal(metric, 'operatingMarginTTM') / 100),
         grossMargin: fmtPct(mVal(metric, 'grossMarginTTM') / 100),
