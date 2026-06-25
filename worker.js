@@ -21,7 +21,7 @@ export default {
       }
     }
 
-    // API Route: Price + 1Y chart (Live via Yahoo)
+    // API Route: Price + 1Y chart + Live daily change (Yahoo)
     if (url.pathname === '/api/stock') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
@@ -33,7 +33,7 @@ export default {
 
       const payload = await fetchChartData(cleanSymbol);
       const resp = json(payload);
-      resp.headers.set('Cache-Control', 'public, max-age=45');
+      resp.headers.set('Cache-Control', 'public, max-age=30');
       if (ctx && ctx.waitUntil) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
       return resp;
     }
@@ -119,17 +119,28 @@ function fmtDividendYield(fraction) {
   return pct.toFixed(2) + '%';
 }
 
-// --- Chart + price data (Yahoo's unauthenticated v8 chart endpoint) ---
+// --- Chart + price data ---
+// Fetches the 1Y daily chart AND a 1d/5m intraday chart in parallel.
+// The 1d chart provides meta.previousClose (yesterday's close) so we can
+// compute the *daily/live* change instead of the buggy 1Y change.
 async function fetchChartData(cleanSymbol) {
   const yfSymbol = cleanSymbol.replace('.', '-');
   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1y&interval=1d`;
+  const liveUrl  = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1d&interval=5m`;
 
-  let price = 0, prevClose = 0, name = cleanSymbol, closes = [], volume = 0, marketCap = 0;
+  let price = 0, name = cleanSymbol, closes = [], timestamps = [];
+  let volume = 0, marketCap = 0;
   let startDateStr = 'N/A', endDateStr = 'N/A', yearHigh = 'N/A', yearLow = 'N/A';
+  let livePrevClose = 0;
 
-  try {
-    const chartRes = await fetch(chartUrl, { headers: { 'User-Agent': UA } });
-    if (chartRes.ok) {
+  const [chartRes, liveRes] = await Promise.all([
+    fetch(chartUrl, { headers: { 'User-Agent': UA } }).catch(() => null),
+    fetch(liveUrl,  { headers: { 'User-Agent': UA } }).catch(() => null)
+  ]);
+
+  // 1Y daily chart for the chart rendering + range stats
+  if (chartRes && chartRes.ok) {
+    try {
       const chartJson = await chartRes.json();
       const result = chartJson && chartJson.chart && chartJson.chart.result && chartJson.chart.result[0];
       if (result) {
@@ -147,28 +158,55 @@ async function fetchChartData(cleanSymbol) {
         }
 
         closes = validPoints.map(p => p.close);
+        timestamps = validPoints.map(p => p.time);
 
         price = meta.regularMarketPrice || price;
-        prevClose = meta.chartPreviousClose || prevClose;
         volume = meta.regularMarketVolume || volume;
         name = meta.shortName || meta.longName || cleanSymbol;
-
         if (meta.marketCap) marketCap = meta.marketCap;
 
         if (closes.length > 0) {
           yearHigh = Math.max(...closes).toFixed(2);
-          yearLow = Math.min(...closes).toFixed(2);
+          yearLow  = Math.min(...closes).toFixed(2);
           startDateStr = new Date(validPoints[0].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-          endDateStr = new Date(validPoints[validPoints.length - 1].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+          endDateStr   = new Date(validPoints[validPoints.length - 1].time * 1000).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
         }
       }
+    } catch (e) {
+      console.error('1Y chart parse error: ', e);
     }
-  } catch (chartErr) {
-    console.error('Chart pipeline fetch error: ', chartErr);
   }
 
-  const change = price - prevClose;
-  const changePercent = prevClose ? (change / prevClose) * 100 : 0;
+  // 1d intraday chart -> live price + previous day close
+  let livePrice = 0;
+  if (liveRes && liveRes.ok) {
+    try {
+      const liveJson = await liveRes.json();
+      const result = liveJson && liveJson.chart && liveJson.chart.result && liveJson.chart.result[0];
+      if (result) {
+        const meta = result.meta || {};
+        livePrice    = (typeof meta.regularMarketPrice === 'number') ? meta.regularMarketPrice : 0;
+        livePrevClose = (typeof meta.previousClose === 'number') ? meta.previousClose
+                       : (typeof meta.chartPreviousClose === 'number') ? meta.chartPreviousClose : 0;
+        if (livePrice) price = livePrice; // override 1Y meta price with the fresher intraday price
+      }
+    } catch (e) {
+      console.error('1D live parse error: ', e);
+    }
+  }
+
+  // Compute daily/live change
+  let change = 0, changePercent = 0;
+  if (livePrevClose) {
+    change = price - livePrevClose;
+    changePercent = livePrevClose ? (change / livePrevClose) * 100 : 0;
+  } else if (closes.length >= 2) {
+    // fallback: last two daily closes (only meaningful after market close)
+    const lastClose = closes[closes.length - 1];
+    const prevDay   = closes[closes.length - 2];
+    change = lastClose - prevDay;
+    changePercent = prevDay ? (change / prevDay) * 100 : 0;
+  }
 
   return {
     symbol: cleanSymbol,
@@ -179,6 +217,7 @@ async function fetchChartData(cleanSymbol) {
     marketCap: marketCap ? formatLargeNum(marketCap) : 'N/A',
     volume: volume ? formatLargeNum(volume) : 'N/A',
     closes,
+    timestamps,
     startDate: startDateStr,
     endDate: endDateStr,
     yearHigh,
@@ -227,7 +266,6 @@ async function fetchFundamentals(cleanSymbol, env) {
       console.error('Analyst data fetch error: ', e);
     }
 
-    // Finnhub returns Market Cap and Shares Outstanding in Millions
     const marketCapM = typeof profile.marketCapitalization === 'number' ? profile.marketCapitalization : null;
     const sharesOutM = typeof profile.shareOutstanding === 'number' ? profile.shareOutstanding : null;
 
@@ -246,7 +284,6 @@ async function fetchFundamentals(cleanSymbol, env) {
         revenuePerShare: fmtNum(mVal(metric, 'revenuePerShareTTM'))
       },
       profitability: {
-        // Finnhub provides margins already as scaled percentages (e.g. 15.5 for 15.5%), so we divide by 100 for fmtPct
         profitMargin: fmtPct(mVal(metric, 'netProfitMarginTTM') / 100),
         operatingMargin: fmtPct(mVal(metric, 'operatingMarginTTM') / 100),
         grossMargin: fmtPct(mVal(metric, 'grossMarginTTM') / 100),
@@ -303,8 +340,8 @@ function getAppHTML() {
 <title>cloudphone stocktracker</title>
 <style>
   :root {
-    --bg: #000000; --card: #111111; --border: #222222; 
-    --text: #ffffff; --muted: #888888; 
+    --bg: #000000; --card: #111111; --border: #222222;
+    --text: #ffffff; --muted: #888888;
     --up: #00ff00; --down: #ff0000; --accent: #00ff00;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -321,7 +358,7 @@ function getAppHTML() {
   .res-item:active { background: var(--bg); }
   .res-sym { font-weight: 700; color: var(--accent); font-size: 13px; }
   .res-name { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  
+
   .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
   .sym { font-size: 15px; height: auto; font-weight: 700; color: #fff; }
@@ -330,11 +367,13 @@ function getAppHTML() {
   .p-val { font-size: 15px; font-weight: 700; }
   .p-change { font-size: 11px; font-weight: 600; margin-top: 2px; }
   .up { color: var(--up); } .down { color: var(--down); }
-  
+  .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 3px; animation: pulse 1.4s infinite; vertical-align: middle; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.25;} }
+
   .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
   .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
   .btn-primary { border-color: var(--accent); color: var(--accent); }
-  
+
   .remove-btn { color: var(--down); background: transparent; border: none; font-size: 11px; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; }
 
   #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 100; padding: 10px; overflow-y: auto; }
@@ -342,7 +381,7 @@ function getAppHTML() {
   .modal-content { background: var(--card); border-radius: 4px; padding: 12px; border: 1px solid var(--border); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 26px; height: 26px; font-size: 13px; cursor: pointer; }
-  
+
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .stat { background: var(--bg); padding: 6px; border-radius: 4px; border: 1px solid var(--border); }
   .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; }
@@ -358,11 +397,20 @@ function getAppHTML() {
   .info-row .stat-lbl { font-size: 10px; }
   .info-row .stat-val { font-size: 11px; text-align: right; }
   .fund-unavailable { text-align: center; padding: 16px 8px; color: var(--muted); font-size: 11px; border: 1px dashed var(--border); border-radius: 4px; margin-top: 8px; line-height: 1.5; }
-  
-  #chart-container { height: 110px; margin: 10px 0; position: relative; }
-  svg { width: 100%; height: 100%; overflow: visible; }
+
+  #chart-container { margin: 10px 0; position: relative; }
+  .chart-svg { width: 100%; height: auto; display: block; }
   .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 12px; }
-  .timeline-label { display: flex; justify-content: space-between; margin-top: -4px; margin-bottom: 12px; font-size: 10px; color: var(--muted); }
+  .timeline-label { display: flex; justify-content: space-between; margin-top: -2px; margin-bottom: 12px; font-size: 10px; color: var(--muted); }
+
+  /* Chart styling - TradingView/Finviz-esque */
+  .tv-grid { stroke: #1d1d1d; stroke-width: 0.5; }
+  .tv-grid-month { stroke: #1a1a1a; stroke-width: 0.5; opacity: 0.6; }
+  .tv-axis { stroke: #2a2a2a; stroke-width: 0.6; }
+  .tv-price-lbl { fill: #777; font-size: 7px; font-family: monospace; }
+  .tv-month-lbl { fill: #666; font-size: 7px; font-family: monospace; }
+  .tv-last-line { stroke-width: 0.5; stroke-dasharray: 2,2; opacity: 0.55; }
+  .tv-tag-txt { font-size: 8px; font-weight: 700; font-family: monospace; }
 </style>
 </head>
 <body>
@@ -414,7 +462,7 @@ function getAppHTML() {
       const data = await res.json();
       const resultsDiv = document.getElementById('search-results');
       if (data.length === 0) { resultsDiv.classList.remove('show'); return; }
-      
+
       resultsDiv.innerHTML = data.map(r => \`
         <div class="res-item" onclick="addStock('\${r.symbol}')">
           <div class="res-sym">\${r.symbol}</div>
@@ -452,7 +500,7 @@ function getAppHTML() {
       container.innerHTML = '<div class="empty">Watchlist empty. Search and build tracking elements.</div>';
       return;
     }
-    
+
     container.innerHTML = '<div class="empty">SYNCING MARKET MATRIX...</div>';
     const html = await Promise.all(watchlist.map(async sym => {
       try {
@@ -461,7 +509,7 @@ function getAppHTML() {
         const d = await res.json();
         const upDown = d.change >= 0 ? 'up' : 'down';
         const arrow = d.change >= 0 ? '▲' : '▼';
-        
+
         return \`
           <div class="card">
             <div class="card-top">
@@ -471,7 +519,7 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}">\${arrow} \${d.change} (\${d.changePercent}%)</div>
+                <div class="p-change \${upDown}"><span class="live-dot"></span>\${arrow} \${d.change} (\${d.changePercent}%)</div>
               </div>
             </div>
             <div class="card-links">
@@ -498,11 +546,29 @@ function getAppHTML() {
     return \`<div class="info-row"><div class="stat-lbl">\${label}</div><div class="\${cls}">\${value}</div></div>\`;
   }
 
+  // ---- Mini sparkline (kept simple for the watchlist look, not used in modal) ----
+  function buildMiniSparkline(closes, isUp) {
+    if (!closes || closes.length < 2) return '';
+    const w = 200, h = 30, p = 2;
+    const min = Math.min(...closes), max = Math.max(...closes);
+    const range = (max - min) || 1;
+    const stepX = (w - p * 2) / (closes.length - 1);
+    let path = '';
+    closes.forEach((v, i) => {
+      const x = p + i * stepX;
+      const y = h - p - ((v - min) / range) * (h - p * 2);
+      path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+    });
+    const color = isUp ? '#00ff00' : '#ff0000';
+    return \`<svg viewBox="0 0 \${w} \${h}" style="width:100%;height:30px;margin:4px 0;"><path d="\${path}" fill="none" stroke="\${color}" stroke-width="1" /></svg>\`;
+  }
+
+  // ---- Full TradingView-style chart for the modal ----
   async function openChart(symbol) {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Vector Continuum';
+    title.innerText = symbol + ' · 1Y Daily';
     body.innerHTML = '<div class="empty">COMPUTING PATHWAYS...</div>';
     modal.classList.add('show');
 
@@ -519,46 +585,154 @@ function getAppHTML() {
           marketCap = f.valuation.marketCap;
         }
       }
-      
+
       if (!d.closes || d.closes.length < 2) {
         body.innerHTML = '<div class="empty">No historical coordinate points returned.</div>';
         return;
       }
 
       const data = d.closes;
-      const w = 220, h = 100, p = 5;
-      const min = Math.min(...data), max = Math.max(...data);
-      const range = max - min || 1;
-      const stepX = (w - p * 2) / (data.length - 1);
-      
+      const times = d.timestamps && d.timestamps.length === data.length ? d.timestamps : [];
+
+      // Chart geometry
+      const w = 340, h = 200;
+      const padL = 4, padR = 42, padT = 10, padB = 22;
+      const chartW = w - padL - padR;
+      const chartH = h - padT - padB;
+
+      const rawMin = Math.min(...data), rawMax = Math.max(...data);
+      const pad = (rawMax - rawMin) * 0.08 || rawMax * 0.02 || 1;
+      const yMin = rawMin - pad;
+      const yMax = rawMax + pad;
+      const yRange = (yMax - yMin) || 1;
+
+      const stepX = chartW / (data.length - 1);
+      const toX = (i) => padL + i * stepX;
+      const toY = (v) => padT + chartH - ((v - yMin) / yRange) * chartH;
+
+      // Build line path
       let pathData = '';
       data.forEach((val, i) => {
-        const x = p + i * stepX;
-        const y = h - p - ((val - min) / range) * (h - p * 2);
-        pathData += (i === 0 ? 'M' : 'L') + x + ',' + y + ' ';
+        pathData += (i === 0 ? 'M' : 'L') + toX(i).toFixed(2) + ',' + toY(val).toFixed(2) + ' ';
       });
 
-      const color = d.change >= 0 ? 'var(--up)' : 'var(--down)';
-      const xEnd = w - p;
-      const yEnd = h - p;
-      const xStart = p;
-      
+      // Build area path
+      const lastX  = toX(data.length - 1);
+      const firstX = toX(0);
+      const bottomY = padT + chartH;
+      const areaPath = pathData +
+        'L' + lastX.toFixed(2) + ',' + bottomY.toFixed(2) + ' ' +
+        'L' + firstX.toFixed(2) + ',' + bottomY.toFixed(2) + ' Z';
+
+      const isUp = Number(d.change) >= 0;
+      const color = isUp ? '#00ff00' : '#ff0000';
+      const safeId = 'g_' + symbol.replace(/[^a-zA-Z0-9]/g, '');
+
+      // Horizontal gridlines + price labels (right side, TradingView style)
+      const gridLines = [];
+      const priceLines = 5;
+      for (let g = 0; g < priceLines; g++) {
+        const frac = g / (priceLines - 1);
+        const yVal = yMin + yRange * frac;
+        const yPos = padT + chartH - frac * chartH;
+        gridLines.push({ y: yPos, val: yVal });
+      }
+
+      // Month markers - vertical gridlines + month labels
+      const monthMarkers = [];
+      if (times.length) {
+        let lastKey = '';
+        for (let i = 0; i < times.length; i++) {
+          const dt = new Date(times[i] * 1000);
+          const key = dt.getFullYear() + '-' + dt.getMonth();
+          if (key !== lastKey) {
+            monthMarkers.push({
+              x: toX(i),
+              label: dt.toLocaleDateString('en-US', { month: 'short' })
+            });
+            lastKey = key;
+          }
+        }
+      }
+
+      // Current price line + tag
+      const lastY = toY(data[data.length - 1]);
+      const lastPriceNum = Number(d.price) || data[data.length - 1];
+
+      // 52W high / low markers (find index)
+      let hiIdx = 0, loIdx = 0;
+      data.forEach((v, i) => {
+        if (v > data[hiIdx]) hiIdx = i;
+        if (v < data[loIdx]) loIdx = i;
+      });
+      const hiY = toY(data[hiIdx]);
+      const loY = toY(data[loIdx]);
+      const hiX = toX(hiIdx);
+      const loX = toX(loIdx);
+
       body.innerHTML = \`
         <div class="card-top">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div>
+            <div class="sym">\${d.symbol}</div>
+            <div class="name">\${d.name}</div>
+          </div>
+          <div class="price">
+            <div class="p-val">\$\${d.price}</div>
+            <div class="p-change \${isUp ? 'up' : 'down'}"><span class="live-dot"></span>\${isUp ? '▲' : '▼'} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
+          </div>
         </div>
+
         <div id="chart-container">
-          <svg viewBox="0 0 \${w} \${h}">
-            <path d="\${pathData} L\${xEnd},\${yEnd} L\${xStart},\${yEnd} Z" fill="\${color}" opacity="0.08" />
-            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.5" stroke-linejoin="round" />
+          <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="\${safeId}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="\${color}" stop-opacity="0.35"/>
+                <stop offset="60%" stop-color="\${color}" stop-opacity="0.08"/>
+                <stop offset="100%" stop-color="\${color}" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+
+            <!-- Horizontal gridlines + price labels (right axis) -->
+            \${gridLines.map(g => \`
+              <line class="tv-grid" x1="\${padL}" y1="\${g.y.toFixed(2)}" x2="\${padL + chartW}" y2="\${g.y.toFixed(2)}" />
+              <text class="tv-price-lbl" x="\${padL + chartW + 3}" y="\${(g.y + 2.5).toFixed(2)}">\${g.val.toFixed(2)}</text>
+            \`).join('')}
+
+            <!-- Vertical month gridlines + month labels -->
+            \${monthMarkers.map(m => \`
+              <line class="tv-grid-month" x1="\${m.x.toFixed(2)}" y1="\${padT}" x2="\${m.x.toFixed(2)}" y2="\${padT + chartH}" />
+              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\${m.label}</text>
+            \`).join('')}
+
+            <!-- Axis baseline -->
+            <line class="tv-axis" x1="\${padL}" y1="\${(padT + chartH).toFixed(2)}" x2="\${padL + chartW}" y2="\${(padT + chartH).toFixed(2)}" />
+            <line class="tv-axis" x1="\${(padL + chartW).toFixed(2)}" y1="\${padT}" x2="\${(padL + chartW).toFixed(2)}" y2="\${padT + chartH}" />
+
+            <!-- Area fill + line -->
+            <path d="\${areaPath}" fill="url(#\${safeId})" />
+            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" />
+
+            <!-- 52W High/Low markers -->
+            <line class="tv-last-line" stroke="\${color}" x1="\${hiX.toFixed(2)}" y1="\${hiY.toFixed(2)}" x2="\${padL + chartW}" y2="\${hiY.toFixed(2)}" opacity="0.25"/>
+            <line class="tv-last-line" stroke="\${color}" x1="\${loX.toFixed(2)}" y1="\${loY.toFixed(2)}" x2="\${padL + chartW}" y2="\${loY.toFixed(2)}" opacity="0.25"/>
+            <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.6" fill="\${color}" opacity="0.55"/>
+            <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.6" fill="\${color}" opacity="0.55"/>
+
+            <!-- Current price horizontal line + tag -->
+            <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
+            <rect x="\${(padL + chartW + 0.5).toFixed(2)}" y="\${(lastY - 5).toFixed(2)}" width="\${padR - 1}" height="10" fill="\${color}" rx="1.5"/>
+            <text class="tv-tag-txt" x="\${(padL + chartW + 3).toFixed(2)}" y="\${(lastY + 2.5).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
+            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.4" fill="\${color}" />
+            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="4.5" fill="\${color}" opacity="0.25" />
           </svg>
         </div>
+
         <div class="timeline-label">
           <span>\${d.startDate}</span>
-          <span style="color:var(--accent);">1Y Price Vector Spectrum</span>
+          <span style="color:var(--accent);">1Y · Daily Close</span>
           <span>\${d.endDate}</span>
         </div>
+
         <div class="grid">
           \${statBox('1Y High', d.yearHigh)}
           \${statBox('1Y Low', d.yearLow)}
@@ -590,7 +764,7 @@ function getAppHTML() {
       let html = \`
         <div class="card-top" style="margin-bottom:4px;">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}"><span class="live-dot"></span>\${d.change >= 0 ? '▲' : '▼'} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div></div>
         </div>
       \`;
 
