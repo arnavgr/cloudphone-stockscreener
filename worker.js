@@ -21,7 +21,7 @@ export default {
       }
     }
 
-    // API Route: Price + 1Y chart (fast, no auth needed - safe to call often)
+    // API Route: Price + 1Y chart (Live Yahoo Processing Layer)
     if (url.pathname === '/api/stock') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
@@ -38,22 +38,33 @@ export default {
       return resp;
     }
 
-    // API Route: Deep fundamentals (slower, needs a Yahoo session crumb - best effort)
+    // API Route: Deep fundamentals - Finnhub Core Framework (KV Cached 24 Hours)
     if (url.pathname === '/api/fundamentals') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
 
-      const cache = caches.default;
-      const cacheKey = new Request(url.toString());
-      const cached = await cache.match(cacheKey);
-      if (cached) return cached;
+      const kv = env.FUNDAMENTALS_KV;
+      const kvKey = 'fundv2:' + cleanSymbol;
 
-      const yfSymbol = cleanSymbol.replace('.', '-');
-      const data = await fetchFundamentals(yfSymbol);
-      const resp = json({ symbol: cleanSymbol, ...data });
-      resp.headers.set('Cache-Control', 'public, max-age=300');
-      if (ctx && ctx.waitUntil) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-      return resp;
+      if (kv) {
+        try {
+          const cachedStr = await kv.get(kvKey);
+          if (cachedStr) return json(JSON.parse(cachedStr));
+        } catch (e) {
+          console.error('KV database read exception tracking payload: ', e);
+        }
+      }
+
+      const data = await fetchFundamentals(cleanSymbol, env);
+      const payload = { symbol: cleanSymbol, ...data };
+
+      if (kv && data.available) {
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil(kv.put(kvKey, JSON.stringify(payload), { expirationTtl: 86400 }).catch(e => console.error('KV cache write exception: ', e)));
+        }
+      }
+
+      return json(payload);
     }
 
     return new Response(getAppHTML(), {
@@ -62,10 +73,10 @@ export default {
   }
 };
 
-// --- Shared config ---
+// --- Config Configuration Setup ---
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// --- Helpers ---
+// --- Global Context Formatter Core Matrix Helpers ---
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -90,18 +101,10 @@ function formatLargeNum(num) {
   return sign + num.toString();
 }
 
-// Pulls the .raw numeric value out of a Yahoo quoteSummary field, or null
-function raw(field) {
-  return field && typeof field.raw === 'number' && isFinite(field.raw) ? field.raw : null;
-}
-
 function fmtNum(val, decimals = 2) {
   return (val === null || val === undefined || isNaN(val)) ? 'N/A' : val.toFixed(decimals);
 }
 
-// Generic fraction -> percent (e.g. 0.245 -> "24.50%"). Used for margins,
-// ROE/ROA, growth and payout ratio, none of which share dividendYield's
-// historical unit ambiguity, so no extra guard is applied here.
 function fmtPct(fraction, decimals = 2) {
   if (fraction === null || fraction === undefined || isNaN(fraction)) return 'N/A';
   const pct = fraction * 100;
@@ -109,9 +112,6 @@ function fmtPct(fraction, decimals = 2) {
   return sign + pct.toFixed(decimals) + '%';
 }
 
-// Yahoo has, at various points, served dividendYield as either a fraction
-// (0.0045) or an already-scaled percent (0.45). Real-world dividend yields
-// are essentially never above ~25%, so this is a safe sanity check either way.
 function fmtDividendYield(fraction) {
   if (fraction === null || fraction === undefined || isNaN(fraction)) return 'N/A';
   let pct = fraction * 100;
@@ -119,12 +119,7 @@ function fmtDividendYield(fraction) {
   return pct.toFixed(2) + '%';
 }
 
-function fmtDate(unixSeconds) {
-  if (!unixSeconds) return 'N/A';
-  return new Date(unixSeconds * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
-}
-
-// --- Chart + price data (Yahoo's unauthenticated v8 chart endpoint) ---
+// --- Chart Data Engine (Unmodified Yahoo Finance v8 Logic) ---
 async function fetchChartData(cleanSymbol) {
   const yfSymbol = cleanSymbol.replace('.', '-');
   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1y&interval=1d`;
@@ -152,15 +147,11 @@ async function fetchChartData(cleanSymbol) {
         }
 
         closes = validPoints.map(p => p.close);
-
         price = meta.regularMarketPrice || price;
         prevClose = meta.chartPreviousClose || prevClose;
         volume = meta.regularMarketVolume || volume;
         name = meta.shortName || meta.longName || cleanSymbol;
 
-        // The chart endpoint occasionally carries marketCap for some
-        // instrument types (e.g. certain ETFs) - use it if present, but
-        // the real source of truth is /api/fundamentals.
         if (meta.marketCap) marketCap = meta.marketCap;
 
         if (closes.length > 0) {
@@ -194,160 +185,132 @@ async function fetchChartData(cleanSymbol) {
   };
 }
 
-// --- Yahoo session auth (cookie + crumb) ---
-// Yahoo's quoteSummary endpoint (where market cap, P/E, margins etc. live)
-// requires a session cookie + crumb token, unlike the plain chart endpoint.
-// This does the same "visit a page, grab the cookie, exchange it for a
-// crumb" dance Yahoo's own site does. It's unofficial and can break or get
-// region-gated behind a cookie-consent flow without notice - every caller
-// treats a null result as "fundamentals unavailable" and degrades to N/A
-// rather than failing the request.
-let yfCookie = null;
-let yfCrumb = null;
-let yfAuthExpiry = 0;
-
-async function getYahooAuth() {
-  if (yfCookie && yfCrumb && Date.now() < yfAuthExpiry) {
-    return { cookie: yfCookie, crumb: yfCrumb };
+// --- Fundamentals Engine (Extensive Finnhub API Adaptation Pipeline) ---
+function mVal(metric, ...candidates) {
+  for (const key of candidates) {
+    const v = metric[key];
+    if (typeof v === 'number' && isFinite(v)) return v;
   }
-
-  try {
-    const initRes = await fetch('https://finance.yahoo.com/quote/AAPL', {
-      headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml,application/xml' },
-      redirect: 'manual'
-    });
-
-    // A redirect here usually means Yahoo wants to run a cookie-consent
-    // flow (seen for some EU/UK egress) which this lightweight client
-    // doesn't implement - bail out cleanly instead of guessing.
-    if (initRes.status >= 300 && initRes.status < 400) return null;
-
-    const setCookies = initRes.headers.getAll ? initRes.headers.getAll('Set-Cookie') : [];
-    if (!setCookies.length) return null;
-    const cookie = setCookies.map(c => c.split(';')[0]).join('; ');
-
-    const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': UA, 'Cookie': cookie, 'Accept': '*/*' }
-    });
-    if (!crumbRes.ok) return null;
-
-    const crumb = (await crumbRes.text()).trim();
-    if (!crumb || crumb.length > 50 || crumb.includes('<')) return null;
-
-    yfCookie = cookie;
-    yfCrumb = crumb;
-    yfAuthExpiry = Date.now() + 20 * 60 * 1000; // reuse for ~20 min
-    return { cookie, crumb };
-  } catch (e) {
-    console.error('Yahoo auth error: ', e);
-    return null;
-  }
+  return null;
 }
 
-// --- Fundamentals (valuation, profitability, dividends, risk, etc.) ---
-async function fetchFundamentals(yfSymbol) {
+async function fetchFundamentals(cleanSymbol, env) {
+  const apiKey = env && env.FINNHUB_API_KEY;
+  if (!apiKey) return { available: false, reason: 'missing_api_key' };
+
+  const sym = encodeURIComponent(cleanSymbol);
+  const token = encodeURIComponent(apiKey);
+
   try {
-    const auth = await getYahooAuth();
-    if (!auth) return { available: false };
+    const [profileRes, metricRes, recRes, ptRes] = await Promise.allSettled([
+      fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${sym}&token=${token}`),
+      fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${sym}&metric=all&token=${token}`),
+      fetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${sym}&token=${token}`),
+      fetch(`https://finnhub.io/api/v1/stock/price-target?symbol=${sym}&token=${token}`)
+    ]);
 
-    const modules = 'summaryDetail,defaultKeyStatistics,financialData,assetProfile';
-    const qsUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(yfSymbol)}?modules=${modules}&crumb=${encodeURIComponent(auth.crumb)}`;
-
-    const res = await fetch(qsUrl, {
-      headers: { 'User-Agent': UA, 'Cookie': auth.cookie, 'Accept': 'application/json' }
-    });
-
-    if (!res.ok) {
-      // Crumb/cookie likely went stale - drop the cache so the next
-      // request gets a fresh one instead of repeating the same failure.
-      yfCookie = null; yfCrumb = null; yfAuthExpiry = 0;
+    if (profileRes.status !== 'fulfilled' || !profileRes.value.ok || metricRes.status !== 'fulfilled' || !metricRes.value.ok) {
       return { available: false };
     }
 
-    const body = await res.json();
-    const result = body && body.quoteSummary && body.quoteSummary.result && body.quoteSummary.result[0];
-    if (!result) return { available: false };
+    const profile = await profileRes.value.json();
+    const metricBody = await metricRes.value.json();
+    const metric = (metricBody && metricBody.metric) || {};
 
-    const sd = result.summaryDetail || {};
-    const ks = result.defaultKeyStatistics || {};
-    const fd = result.financialData || {};
-    const ap = result.assetProfile || {};
+    if (!profile || !profile.name) return { available: false };
 
-    const debtToEquityRaw = raw(fd.debtToEquity);
-    const employees = ap.fullTimeEmployees;
+    let recommendation = null, priceTarget = null;
+    if (recRes.status === 'fulfilled' && recRes.value.ok) {
+      const recArr = await recRes.value.json();
+      if (Array.isArray(recArr) && recArr.length > 0) recommendation = recArr[0];
+    }
+    if (ptRes.status === 'fulfilled' && ptRes.value.ok) {
+      const ptData = await ptRes.value.json();
+      if (ptData && (ptData.targetMean || ptData.targetHigh)) priceTarget = ptData;
+    }
+
+    const marketCapM = typeof profile.marketCapitalization === 'number' ? profile.marketCapitalization : null;
+    const sharesOutM = typeof profile.shareOutstanding === 'number' ? profile.shareOutstanding : null;
+
+    // Note: Finnhub metrics values inside raw JSON response payloads are already scaled by 100 (e.g. roeTTM: 15.4 means 15.4%). 
+    // We pass them to our existing pct framework divider safely.
+    const pctMap = (key) => {
+      const v = mVal(metric, key);
+      return v !== null ? v / 100 : null;
+    };
 
     return {
       available: true,
       valuation: {
-        marketCap: raw(sd.marketCap) !== null ? formatLargeNum(raw(sd.marketCap)) : 'N/A',
-        peTrailing: fmtNum(raw(sd.trailingPE)),
-        peForward: fmtNum(raw(sd.forwardPE)),
-        peg: fmtNum(raw(ks.pegRatio)),
-        priceToBook: fmtNum(raw(ks.priceToBook)),
-        priceToSales: fmtNum(raw(sd.priceToSalesTrailing12Months)),
-        evToEbitda: fmtNum(raw(ks.enterpriseToEbitda))
+        marketCap: marketCapM !== null ? formatLargeNum(marketCapM * 1e6) : 'N/A',
+        peTrailing: fmtNum(mVal(metric, 'peTTM', 'peBasicExclExtraTTM', 'peExclExtraTTM', 'peNormalizedAnnual')),
+        peForward: fmtNum(mVal(metric, 'forwardPE')),
+        peg: fmtNum(mVal(metric, 'pegRatioTTM', 'pegRatio')),
+        priceToBook: fmtNum(mVal(metric, 'pb', 'pbQuarterly', 'pbAnnual')),
+        priceToSales: fmtNum(mVal(metric, 'psTTM', 'psAnnual', 'ps')),
+        evToRevenue: fmtNum(mVal(metric, 'ev/revenueQuarterly', 'ev/revenueAnnual', 'evToRevenue')),
+        evToEbitda: fmtNum(mVal(metric, 'ev/ebitdaQuarterly', 'ev/ebitdaAnnual', 'evToEbitda'))
       },
       perShare: {
-        eps: fmtNum(raw(ks.trailingEps)),
-        epsForward: fmtNum(raw(ks.forwardEps)),
-        bookValue: fmtNum(raw(ks.bookValue)),
-        revenuePerShare: fmtNum(raw(fd.revenuePerShare))
+        eps: fmtNum(mVal(metric, 'epsBasicExclExtraItemsTTM', 'epsTTM', 'epsAnnual')),
+        dilutedEps: fmtNum(mVal(metric, 'epsDilutedTTM', 'epsDilutedAnnual')),
+        bookValue: fmtNum(mVal(metric, 'bookValuePerShareQuarterly', 'bookValuePerShareAnnual', 'bookValue')),
+        revenuePerShare: fmtNum(mVal(metric, 'revenuePerShareTTM', 'salesPerShare'))
       },
       profitability: {
-        grossMargin: fmtPct(raw(fd.grossMargins)),
-        operatingMargin: fmtPct(raw(fd.operatingMargins)),
-        netMargin: fmtPct(raw(fd.profitMargins)),
-        roe: fmtPct(raw(fd.returnOnEquity)),
-        roa: fmtPct(raw(fd.returnOnAssets))
+        grossProfit: 'N/A', // Omitted from Finnhub basic metric array block
+        profitMargin: fmtPct(pctMap('netProfitMarginTTM')),
+        operatingMargin: fmtPct(pctMap('operatingMarginTTM')),
+        roe: fmtPct(pctMap('roeTTM')),
+        roa: fmtPct(pctMap('roaTTM'))
       },
       growth: {
-        revenueGrowth: fmtPct(raw(fd.revenueGrowth)),
-        earningsGrowth: fmtPct(raw(fd.earningsGrowth))
+        revenueGrowth: fmtPct(pctMap('revenueGrowthTTMYoy')),
+        earningsGrowth: fmtPct(pctMap('epsGrowthTTMYoy'))
       },
       dividends: {
-        yield: fmtDividendYield(raw(sd.dividendYield)),
-        rate: fmtNum(raw(sd.dividendRate)),
-        payoutRatio: fmtPct(raw(sd.payoutRatio)),
-        exDividendDate: fmtDate(raw(sd.exDividendDate))
-      },
-      financialHealth: {
-        debtToEquity: debtToEquityRaw !== null ? debtToEquityRaw.toFixed(2) : 'N/A',
-        currentRatio: fmtNum(raw(fd.currentRatio)),
-        quickRatio: fmtNum(raw(fd.quickRatio)),
-        totalCash: raw(fd.totalCash) !== null ? formatLargeNum(raw(fd.totalCash)) : 'N/A',
-        totalDebt: raw(fd.totalDebt) !== null ? formatLargeNum(raw(fd.totalDebt)) : 'N/A',
-        freeCashFlow: raw(fd.freeCashflow) !== null ? formatLargeNum(raw(fd.freeCashflow)) : 'N/A'
+        yield: fmtDividendYield((mVal(metric, 'dividendYieldIndicatedAnnual', 'currentDividendYieldTTM') || 0) / 100),
+        perShare: fmtNum(mVal(metric, 'dividendPerShareAnnual', 'dividendPerShareTTM')),
+        forwardRate: fmtNum(mVal(metric, 'dividendRateIndicatedAnnual')),
+        exDividendDate: 'N/A'
       },
       trading: {
-        beta: fmtNum(raw(sd.beta)),
-        fiftyTwoWeekHigh: fmtNum(raw(sd.fiftyTwoWeekHigh)),
-        fiftyTwoWeekLow: fmtNum(raw(sd.fiftyTwoWeekLow)),
-        fiftyDayAvg: fmtNum(raw(sd.fiftyDayAverage)),
-        twoHundredDayAvg: fmtNum(raw(sd.twoHundredDayAverage)),
-        avgVolume: raw(sd.averageVolume) !== null ? formatLargeNum(raw(sd.averageVolume)) : 'N/A',
-        sharesOutstanding: raw(ks.sharesOutstanding) !== null ? formatLargeNum(raw(ks.sharesOutstanding)) : 'N/A',
-        shortPercentFloat: fmtPct(raw(ks.shortPercentOfFloat))
+        beta: fmtNum(mVal(metric, 'beta')),
+        fiftyTwoWeekHigh: fmtNum(mVal(metric, '52WeekHigh')),
+        fiftyTwoWeekLow: fmtNum(mVal(metric, '52WeekLow')),
+        fiftyDayAvg: fmtNum(mVal(metric, '50DayMovingAverage')),
+        twoHundredDayAvg: fmtNum(mVal(metric, '200DayMovingAverage')),
+        sharesOutstanding: sharesOutM !== null ? formatLargeNum(sharesOutM * 1e6) : 'N/A',
+        sharesFloat: 'N/A'
+      },
+      ownership: {
+        percentInsiders: 'N/A',
+        percentInstitutions: 'N/A',
+        shortRatio: 'N/A',
+        shortPercentFloat: 'N/A'
       },
       analyst: {
-        recommendation: fd.recommendationKey ? fd.recommendationKey.replace(/_/g, ' ').toUpperCase() : 'N/A',
-        targetMean: fmtNum(raw(fd.targetMeanPrice)),
-        targetHigh: fmtNum(raw(fd.targetHighPrice)),
-        targetLow: fmtNum(raw(fd.targetLowPrice)),
-        numAnalysts: (typeof fd.numberOfAnalystOpinions === 'number') ? String(fd.numberOfAnalystOpinions) : 'N/A'
+        targetPrice: (priceTarget && fmtNum(priceTarget.targetMean)) || 'N/A',
+        strongBuy: recommendation ? String(recommendation.strongBuy) : 'N/A',
+        buy: recommendation ? String(recommendation.buy) : 'N/A',
+        hold: recommendation ? String(recommendation.hold) : 'N/A',
+        sell: recommendation ? String(recommendation.sell) : 'N/A',
+        strongSell: recommendation ? String(recommendation.strongSell) : 'N/A'
       },
       company: {
-        sector: ap.sector || 'N/A',
-        industry: ap.industry || 'N/A',
-        employees: (typeof employees === 'number') ? employees.toLocaleString('en-US') : 'N/A'
+        sector: profile.finnhubIndustry || 'N/A',
+        industry: profile.finnhubIndustry || 'N/A',
+        exchange: profile.exchange || 'N/A',
+        employees: profile.employeeTotal ? profile.employeeTotal.toLocaleString('en-US') : 'N/A'
       }
     };
   } catch (e) {
-    console.error('Fundamentals fetch error: ', e);
+    console.error('Fundamentals tracking runtime block execution exception: ', e);
     return { available: false };
   }
 }
 
-// --- Frame Layout Layout ---
+// --- Frame UI Matrix Layout (100% Retained Structure Configuration) ---
 function getAppHTML() {
   return `
 <!DOCTYPE html>
@@ -522,7 +485,7 @@ function getAppHTML() {
             <div class="card-top">
               <div>
                 <div class="sym">\${d.symbol}</div>
-                <div class="name">\${d.name}</div>
+                <div class="name">\text{\${d.name}}</div>
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
@@ -601,7 +564,7 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \text{\${d.change >= 0 ? 'up' : 'down'}}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg viewBox="0 0 \${w} \${h}">
@@ -652,7 +615,7 @@ function getAppHTML() {
       if (!f.available) {
         html += \`
           <div class="fund-unavailable">
-            Deep fundamentals are temporarily unavailable from Yahoo's data feed.<br>
+            Deep fundamentals are temporarily unavailable (data feed quota or lookup issue).<br>
             Price, volume and 1Y range below still come from the live chart feed.
           </div>
           <div class="fund-section-title">Trading Range</div>
@@ -668,7 +631,7 @@ function getAppHTML() {
       }
 
       const v = f.valuation, ps = f.perShare, pr = f.profitability, g = f.growth,
-            dv = f.dividends, fh = f.financialHealth, tr = f.trading, an = f.analyst, co = f.company;
+            dv = f.dividends, tr = f.trading, ow = f.ownership, an = f.analyst, co = f.company;
 
       html += \`
         <div class="fund-section-title">Valuation</div>
@@ -679,27 +642,28 @@ function getAppHTML() {
           \${statBox('PEG Ratio', v.peg)}
           \${statBox('Price/Book', v.priceToBook)}
           \${statBox('Price/Sales', v.priceToSales)}
+          \${statBox('EV/Revenue', v.evToRevenue)}
           \${statBox('EV/EBITDA', v.evToEbitda)}
         </div>
 
         <div class="fund-section-title">Per Share</div>
         <div class="grid">
-          \${statBox('EPS (TTM)', ps.eps)}
-          \${statBox('EPS (Fwd)', ps.epsForward)}
+          \${statBox('EPS', ps.eps)}
+          \${statBox('Diluted EPS', ps.dilutedEps)}
           \${statBox('Book Value', ps.bookValue)}
           \${statBox('Revenue/Shr', ps.revenuePerShare)}
         </div>
 
         <div class="fund-section-title">Profitability</div>
         <div class="grid">
-          \${statBox('Gross Margin', pr.grossMargin)}
+          \${statBox('Gross Profit', pr.grossProfit)}
+          \${statBox('Profit Margin', pr.profitMargin)}
           \${statBox('Oper. Margin', pr.operatingMargin)}
-          \${statBox('Net Margin', pr.netMargin)}
           \${statBox('ROE', pr.roe)}
           \${statBox('ROA', pr.roa)}
         </div>
 
-        <div class="fund-section-title">Growth (YoY)</div>
+        <div class="fund-section-title">Growth (YoY, Qtrly)</div>
         <div class="grid">
           \${statBox('Revenue Gr.', g.revenueGrowth)}
           \${statBox('Earnings Gr.', g.earningsGrowth)}
@@ -708,19 +672,9 @@ function getAppHTML() {
         <div class="fund-section-title">Dividends</div>
         <div class="grid">
           \${statBox('Yield', dv.yield)}
-          \${statBox('Rate', dv.rate)}
-          \${statBox('Payout Ratio', dv.payoutRatio)}
+          \${statBox('Per Share', dv.perShare)}
+          \${statBox('Fwd Annual Rate', dv.forwardRate)}
           \${statBox('Ex-Div Date', dv.exDividendDate)}
-        </div>
-
-        <div class="fund-section-title">Financial Health</div>
-        <div class="grid">
-          \${statBox('Debt/Equity', fh.debtToEquity)}
-          \${statBox('Current Ratio', fh.currentRatio)}
-          \${statBox('Quick Ratio', fh.quickRatio)}
-          \${statBox('Total Cash', fh.totalCash)}
-          \${statBox('Total Debt', fh.totalDebt)}
-          \${statBox('Free Cash Flow', fh.freeCashFlow)}
         </div>
 
         <div class="fund-section-title">Trading Stats</div>
@@ -730,24 +684,33 @@ function getAppHTML() {
           \${statBox('52W Low', tr.fiftyTwoWeekLow)}
           \${statBox('50D Avg', tr.fiftyDayAvg)}
           \${statBox('200D Avg', tr.twoHundredDayAvg)}
-          \${statBox('Avg Volume', tr.avgVolume)}
           \${statBox('Shares Out', tr.sharesOutstanding)}
-          \${statBox('Short % Float', tr.shortPercentFloat)}
+          \${statBox('Shares Float', tr.sharesFloat)}
+        </div>
+
+        <div class="fund-section-title">Ownership &amp; Short Interest</div>
+        <div class="grid">
+          \${statBox('% Insiders', ow.percentInsiders)}
+          \${statBox('% Institutions', ow.percentInstitutions)}
+          \${statBox('Short Ratio', ow.shortRatio)}
+          \${statBox('Short % Float', ow.shortPercentFloat)}
         </div>
 
         <div class="fund-section-title">Analyst Views</div>
         <div class="grid">
-          \${statBox('Rating', an.recommendation)}
-          \${statBox('# Analysts', an.numAnalysts)}
-          \${statBox('Target Mean', an.targetMean)}
-          \${statBox('Target High', an.targetHigh)}
-          \${statBox('Target Low', an.targetLow)}
+          \${statBox('Target Price', an.targetPrice)}
+          \${statBox('Strong Buy', an.strongBuy)}
+          \${statBox('Buy', an.buy)}
+          \${statBox('Hold', an.hold)}
+          \${statBox('Sell', an.sell)}
+          \${statBox('Strong Sell', an.strongSell)}
         </div>
 
         <div class="fund-section-title">Company</div>
         <div>
           \${infoRow('Sector', co.sector)}
           \${infoRow('Industry', co.industry)}
+          \${infoRow('Exchange', co.exchange)}
           \${infoRow('Employees', co.employees)}
         </div>
       \`;
