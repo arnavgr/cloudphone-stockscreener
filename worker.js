@@ -120,9 +120,6 @@ function fmtDividendYield(fraction) {
 }
 
 // --- Chart + price data ---
-// Fetches the 1Y daily chart AND a 1d/5m intraday chart in parallel.
-// The 1d chart provides meta.previousClose (yesterday's close) so we can
-// compute the *daily/live* change instead of the buggy 1Y change.
 async function fetchChartData(cleanSymbol) {
   const yfSymbol = cleanSymbol.replace('.', '-');
   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1y&interval=1d`;
@@ -188,7 +185,7 @@ async function fetchChartData(cleanSymbol) {
         livePrice    = (typeof meta.regularMarketPrice === 'number') ? meta.regularMarketPrice : 0;
         livePrevClose = (typeof meta.previousClose === 'number') ? meta.previousClose
                        : (typeof meta.chartPreviousClose === 'number') ? meta.chartPreviousClose : 0;
-        if (livePrice) price = livePrice; // override 1Y meta price with the fresher intraday price
+        if (livePrice) price = livePrice; 
       }
     } catch (e) {
       console.error('1D live parse error: ', e);
@@ -201,7 +198,6 @@ async function fetchChartData(cleanSymbol) {
     change = price - livePrevClose;
     changePercent = livePrevClose ? (change / livePrevClose) * 100 : 0;
   } else if (closes.length >= 2) {
-    // fallback: last two daily closes (only meaningful after market close)
     const lastClose = closes[closes.length - 1];
     const prevDay   = closes[closes.length - 2];
     change = lastClose - prevDay;
@@ -345,72 +341,73 @@ function getAppHTML() {
     --up: #00ff00; --down: #ff0000; --accent: #00ff00;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: monospace; padding-bottom: 40px; }
+  body { background: var(--bg); color: var(--text); font-family: monospace; padding-bottom: 40px; font-size: 4.2vw; }
   header { background: var(--card); padding: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
-  h1 { font-size: 14px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  h1 { font-size: 4vw; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
   .logo { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; }
   .search-container { position: relative; }
-  input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-family: monospace; outline: none; }
+  input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 4.2vw; font-family: monospace; outline: none; }
   input:focus { border-color: var(--accent); }
   #search-results { display: none; position: absolute; top: 42px; left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; z-index: 20; }
   #search-results.show { display: block; }
   .res-item { padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .res-item:active { background: var(--bg); }
-  .res-sym { font-weight: 700; color: var(--accent); font-size: 13px; }
-  .res-name { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .res-sym { font-weight: 700; color: var(--accent); font-size: 4.2vw; }
+  .res-name { font-size: 3.4vw; color: var(--muted); margin-top: 2px; }
 
   .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-  .sym { font-size: 15px; height: auto; font-weight: 700; color: #fff; }
-  .name { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .sym { font-size: 4.6vw; height: auto; font-weight: 700; color: #fff; }
+  .name { font-size: 3.4vw; color: var(--muted); margin-top: 2px; word-break: break-all; }
   .price { text-align: right; }
-  .p-val { font-size: 15px; font-weight: 700; }
-  .p-change { font-size: 11px; font-weight: 600; margin-top: 2px; }
+  .p-val { font-size: 4.6vw; font-weight: 700; }
+  .p-change { font-size: 3.6vw; font-weight: 600; margin-top: 2px; }
   .up { color: var(--up); } .down { color: var(--down); }
   .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 3px; animation: pulse 1.4s infinite; vertical-align: middle; }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.25;} }
 
   .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
-  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
+  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 3.6vw; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
   .btn-primary { border-color: var(--accent); color: var(--accent); }
 
-  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 11px; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; }
+  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 3.4vw; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; width: 100%; }
 
-  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 100; padding: 10px; overflow-y: auto; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.98); z-index: 100; padding: 10px; overflow-y: scroll; -webkit-overflow-scrolling: touch; outline: none; }
   #modal.show { display: block; }
   .modal-content { background: var(--card); border-radius: 4px; padding: 12px; border: 1px solid var(--border); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 26px; height: 26px; font-size: 13px; cursor: pointer; }
+  .modal-header h2 { font-size: 4vw; text-transform: uppercase; }
+  .close-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); width: 26px; height: 26px; font-size: 13px; cursor: pointer; flex-shrink: 0; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .stat { background: var(--bg); padding: 6px; border-radius: 4px; border: 1px solid var(--border); }
-  .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; }
-  .stat-val { font-size: 12px; font-weight: 600; margin-top: 2px; }
+  .stat-lbl { font-size: 3vw; color: var(--muted); text-transform: uppercase; }
+  .stat-val { font-size: 3.8vw; font-weight: 600; margin-top: 2px; word-break: break-all; }
   .stat-val.na { color: var(--muted); font-weight: 400; }
   .stat-val.pos { color: var(--up); }
   .stat-val.neg { color: var(--down); }
 
-  .fund-section-title { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .fund-section-title { font-size: 3.8vw; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
   .fund-section-title:first-of-type { margin-top: 0; }
-  .info-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+  .info-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 3.8vw; }
   .info-row:last-child { border-bottom: none; }
-  .info-row .stat-lbl { font-size: 10px; }
-  .info-row .stat-val { font-size: 11px; text-align: right; }
-  .fund-unavailable { text-align: center; padding: 16px 8px; color: var(--muted); font-size: 11px; border: 1px dashed var(--border); border-radius: 4px; margin-top: 8px; line-height: 1.5; }
+  .info-row .stat-lbl { font-size: 3.4vw; }
+  .info-row .stat-val { font-size: 3.8vw; text-align: right; }
+  .fund-unavailable { text-align: center; padding: 16px 8px; color: var(--muted); font-size: 3.6vw; border: 1px dashed var(--border); border-radius: 4px; margin-top: 8px; line-height: 1.5; }
 
-  #chart-container { margin: 10px 0; position: relative; }
+  #chart-container { margin: 10px 0; position: relative; width: 100%; }
   .chart-svg { width: 100%; height: auto; display: block; }
-  .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 12px; }
-  .timeline-label { display: flex; justify-content: space-between; margin-top: -2px; margin-bottom: 12px; font-size: 10px; color: var(--muted); }
+  .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 3.6vw; }
+  .timeline-label { display: flex; justify-content: space-between; margin-top: -2px; margin-bottom: 12px; font-size: 3vw; color: var(--muted); }
 
   /* Chart styling - TradingView/Finviz-esque */
-  .tv-grid { stroke: #1d1d1d; stroke-width: 0.5; }
-  .tv-grid-month { stroke: #1a1a1a; stroke-width: 0.5; opacity: 0.6; }
-  .tv-axis { stroke: #2a2a2a; stroke-width: 0.6; }
-  .tv-price-lbl { fill: #777; font-size: 7px; font-family: monospace; }
-  .tv-month-lbl { fill: #666; font-size: 7px; font-family: monospace; }
-  .tv-last-line { stroke-width: 0.5; stroke-dasharray: 2,2; opacity: 0.55; }
-  .tv-tag-txt { font-size: 8px; font-weight: 700; font-family: monospace; }
+  .tv-grid { stroke: #1d1d1d; stroke-width: 0.6; }
+  .tv-grid-month { stroke: #1a1a1a; stroke-width: 0.6; opacity: 0.6; }
+  .tv-axis { stroke: #2a2a2a; stroke-width: 0.8; }
+  .tv-price-lbl { fill: #777; font-size: 10px; font-family: monospace; }
+  .tv-month-lbl { fill: #666; font-size: 9px; font-family: monospace; }
+  .tv-last-line { stroke-width: 0.7; stroke-dasharray: 2,2; opacity: 0.55; }
+  .tv-tag-txt { font-size: 11px; font-weight: 700; font-family: monospace; }
 </style>
 </head>
 <body>
@@ -425,10 +422,10 @@ function getAppHTML() {
 
 <div id="watchlist"></div>
 
-<div id="modal">
+<div id="modal" tabindex="0">
   <div class="modal-content">
     <div class="modal-header">
-      <h2 id="modal-title" style="font-size:13px; text-transform:uppercase;">Historical Analytics</h2>
+      <h2 id="modal-title">Historical Analytics</h2>
       <button class="close-btn" onclick="closeModal()">✕</button>
     </div>
     <div id="modal-body"></div>
@@ -546,23 +543,6 @@ function getAppHTML() {
     return \`<div class="info-row"><div class="stat-lbl">\${label}</div><div class="\${cls}">\${value}</div></div>\`;
   }
 
-  // ---- Mini sparkline (kept simple for the watchlist look, not used in modal) ----
-  function buildMiniSparkline(closes, isUp) {
-    if (!closes || closes.length < 2) return '';
-    const w = 200, h = 30, p = 2;
-    const min = Math.min(...closes), max = Math.max(...closes);
-    const range = (max - min) || 1;
-    const stepX = (w - p * 2) / (closes.length - 1);
-    let path = '';
-    closes.forEach((v, i) => {
-      const x = p + i * stepX;
-      const y = h - p - ((v - min) / range) * (h - p * 2);
-      path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
-    });
-    const color = isUp ? '#00ff00' : '#ff0000';
-    return \`<svg viewBox="0 0 \${w} \${h}" style="width:100%;height:30px;margin:4px 0;"><path d="\${path}" fill="none" stroke="\${color}" stroke-width="1" /></svg>\`;
-  }
-
   // ---- Full TradingView-style chart for the modal ----
   async function openChart(symbol) {
     const modal = document.getElementById('modal');
@@ -588,15 +568,16 @@ function getAppHTML() {
 
       if (!d.closes || d.closes.length < 2) {
         body.innerHTML = '<div class="empty">No historical coordinate points returned.</div>';
+        requestAnimationFrame(() => modal.focus());
         return;
       }
 
       const data = d.closes;
       const times = d.timestamps && d.timestamps.length === data.length ? d.timestamps : [];
 
-      // Chart geometry
-      const w = 340, h = 200;
-      const padL = 4, padR = 42, padT = 10, padB = 22;
+      // Chart geometry optimized for portrait phone screens
+      const w = 260, h = 240; 
+      const padL = 4, padR = 48, padT = 15, padB = 24;
       const chartW = w - padL - padR;
       const chartH = h - padT - padB;
 
@@ -628,7 +609,7 @@ function getAppHTML() {
       const color = isUp ? '#00ff00' : '#ff0000';
       const safeId = 'g_' + symbol.replace(/[^a-zA-Z0-9]/g, '');
 
-      // Horizontal gridlines + price labels (right side, TradingView style)
+      // Horizontal gridlines + price labels
       const gridLines = [];
       const priceLines = 5;
       for (let g = 0; g < priceLines; g++) {
@@ -638,7 +619,7 @@ function getAppHTML() {
         gridLines.push({ y: yPos, val: yVal });
       }
 
-      // Month markers - vertical gridlines + month labels
+      // Month markers
       const monthMarkers = [];
       if (times.length) {
         let lastKey = '';
@@ -659,7 +640,7 @@ function getAppHTML() {
       const lastY = toY(data[data.length - 1]);
       const lastPriceNum = Number(d.price) || data[data.length - 1];
 
-      // 52W high / low markers (find index)
+      // 52W high / low markers
       let hiIdx = 0, loIdx = 0;
       data.forEach((v, i) => {
         if (v > data[hiIdx]) hiIdx = i;
@@ -683,7 +664,7 @@ function getAppHTML() {
         </div>
 
         <div id="chart-container">
-          <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="none">
+          <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="xMidYMid meet">
             <defs>
               <linearGradient id="\${safeId}" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stop-color="\${color}" stop-opacity="0.35"/>
@@ -695,7 +676,7 @@ function getAppHTML() {
             <!-- Horizontal gridlines + price labels (right axis) -->
             \${gridLines.map(g => \`
               <line class="tv-grid" x1="\${padL}" y1="\${g.y.toFixed(2)}" x2="\${padL + chartW}" y2="\${g.y.toFixed(2)}" />
-              <text class="tv-price-lbl" x="\${padL + chartW + 3}" y="\${(g.y + 2.5).toFixed(2)}">\${g.val.toFixed(2)}</text>
+              <text class="tv-price-lbl" x="\${padL + chartW + 4}" y="\${(g.y + 4).toFixed(2)}">\${g.val.toFixed(2)}</text>
             \`).join('')}
 
             <!-- Vertical month gridlines + month labels -->
@@ -710,20 +691,20 @@ function getAppHTML() {
 
             <!-- Area fill + line -->
             <path d="\${areaPath}" fill="url(#\${safeId})" />
-            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" />
+            <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
 
             <!-- 52W High/Low markers -->
             <line class="tv-last-line" stroke="\${color}" x1="\${hiX.toFixed(2)}" y1="\${hiY.toFixed(2)}" x2="\${padL + chartW}" y2="\${hiY.toFixed(2)}" opacity="0.25"/>
             <line class="tv-last-line" stroke="\${color}" x1="\${loX.toFixed(2)}" y1="\${loY.toFixed(2)}" x2="\${padL + chartW}" y2="\${loY.toFixed(2)}" opacity="0.25"/>
-            <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.6" fill="\${color}" opacity="0.55"/>
-            <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.6" fill="\${color}" opacity="0.55"/>
+            <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
+            <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
 
             <!-- Current price horizontal line + tag -->
             <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
-            <rect x="\${(padL + chartW + 0.5).toFixed(2)}" y="\${(lastY - 5).toFixed(2)}" width="\${padR - 1}" height="10" fill="\${color}" rx="1.5"/>
-            <text class="tv-tag-txt" x="\${(padL + chartW + 3).toFixed(2)}" y="\${(lastY + 2.5).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
-            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.4" fill="\${color}" />
-            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="4.5" fill="\${color}" opacity="0.25" />
+            <rect x="\${(padL + chartW + 1).toFixed(2)}" y="\${(lastY - 6).toFixed(2)}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
+            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
+            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.8" fill="\${color}" />
+            <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="5" fill="\${color}" opacity="0.25" />
           </svg>
         </div>
 
@@ -743,13 +724,18 @@ function getAppHTML() {
     } catch(e) {
       body.innerHTML = '<div class="empty">Chart processing pipeline failure.</div>';
     }
+    // Auto-focus modal to capture D-pad scrolling immediately on feature phones
+    requestAnimationFrame(() => {
+      modal.scrollTop = 0;
+      modal.focus();
+    });
   }
 
   async function openScreener(symbol) {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
     const title = document.getElementById('modal-title');
-    title.innerText = symbol + ' Fundamental Data';
+    title.innerText = symbol + ' Fundamentals';
     body.innerHTML = '<div class="empty">DECODING FINANCIAL LEDGERS...</div>';
     modal.classList.add('show');
 
@@ -783,6 +769,7 @@ function getAppHTML() {
           </div>
         \`;
         body.innerHTML = html;
+        requestAnimationFrame(() => modal.focus());
         return;
       }
 
@@ -864,6 +851,11 @@ function getAppHTML() {
     } catch(e) {
       body.innerHTML = '<div class="empty">Ledger interpretation timeout error.</div>';
     }
+    // Auto-focus modal to capture D-pad scrolling immediately on feature phones
+    requestAnimationFrame(() => {
+      modal.scrollTop = 0;
+      modal.focus();
+    });
   }
 
   function closeModal() {
