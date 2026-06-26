@@ -13,7 +13,8 @@ export default {
         });
         const data = await res.json();
         const results = (data.quotes || [])
-          .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF')
+          // Added CRYPTOCURRENCY filter for Yahoo search
+          .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'CRYPTOCURRENCY')
           .map(q => ({ symbol: q.symbol, name: q.shortname || q.longname || q.symbol }));
         return json(results);
       } catch (e) {
@@ -42,6 +43,11 @@ export default {
     if (url.pathname === '/api/fundamentals') {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
+
+      // Crypto Short-Circuit: Protects KV reads & Finnhub quota
+      if (cleanSymbol.includes('-USD') || cleanSymbol.includes('-EUR')) {
+        return json({ available: false, isCrypto: true });
+      }
 
       const kv = env.FUNDAMENTALS_KV;
       const kvKey = 'fundv3:' + cleanSymbol;
@@ -438,7 +444,7 @@ function getAppHTML() {
   const urlParams = new URLSearchParams(window.location.search);
   const sParam = urlParams.get('s');
   if (sParam) watchlist = sParam.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
-  if (watchlist.length === 0) watchlist = ['AAPL', 'MSFT', 'GOOG'];
+  if (watchlist.length === 0) watchlist = ['AAPL', 'MSFT', 'BTC-USD'];
 
   function updateUrl() {
     const newUrl = window.location.pathname + '?s=' + watchlist.join(',');
@@ -516,7 +522,7 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}"><span class="live-dot"></span>\${arrow} \${d.change} (\${d.changePercent}%)</div>
+                <div class="p-change \${upDown}"><span class="live-dot"></span>\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
               </div>
             </div>
             <div class="card-links">
@@ -559,9 +565,11 @@ function getAppHTML() {
       ]);
       const d = await stockRes.json();
       let marketCap = d.marketCap;
+      
       if (fundRes && fundRes.ok) {
         const f = await fundRes.json();
-        if (f.available && f.valuation && f.valuation.marketCap !== 'N/A') {
+        // Fallback to stock feed market cap if crypto/unavailable
+        if (f.available && !f.isCrypto && f.valuation && f.valuation.marketCap !== 'N/A') {
           marketCap = f.valuation.marketCap;
         }
       }
@@ -673,33 +681,27 @@ function getAppHTML() {
               </linearGradient>
             </defs>
 
-            <!-- Horizontal gridlines + price labels (right axis) -->
             \${gridLines.map(g => \`
               <line class="tv-grid" x1="\${padL}" y1="\${g.y.toFixed(2)}" x2="\${padL + chartW}" y2="\${g.y.toFixed(2)}" />
               <text class="tv-price-lbl" x="\${padL + chartW + 4}" y="\${(g.y + 4).toFixed(2)}">\${g.val.toFixed(2)}</text>
             \`).join('')}
 
-            <!-- Vertical month gridlines + month labels -->
             \${monthMarkers.map(m => \`
               <line class="tv-grid-month" x1="\${m.x.toFixed(2)}" y1="\${padT}" x2="\${m.x.toFixed(2)}" y2="\${padT + chartH}" />
               <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\${m.label}</text>
             \`).join('')}
 
-            <!-- Axis baseline -->
             <line class="tv-axis" x1="\${padL}" y1="\${(padT + chartH).toFixed(2)}" x2="\${padL + chartW}" y2="\${(padT + chartH).toFixed(2)}" />
             <line class="tv-axis" x1="\${(padL + chartW).toFixed(2)}" y1="\${padT}" x2="\${(padL + chartW).toFixed(2)}" y2="\${padT + chartH}" />
 
-            <!-- Area fill + line -->
             <path d="\${areaPath}" fill="url(#\${safeId})" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
 
-            <!-- 52W High/Low markers -->
             <line class="tv-last-line" stroke="\${color}" x1="\${hiX.toFixed(2)}" y1="\${hiY.toFixed(2)}" x2="\${padL + chartW}" y2="\${hiY.toFixed(2)}" opacity="0.25"/>
             <line class="tv-last-line" stroke="\${color}" x1="\${loX.toFixed(2)}" y1="\${loY.toFixed(2)}" x2="\${padL + chartW}" y2="\${loY.toFixed(2)}" opacity="0.25"/>
             <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
             <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
 
-            <!-- Current price horizontal line + tag -->
             <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
             <rect x="\${(padL + chartW + 1).toFixed(2)}" y="\${(lastY - 6).toFixed(2)}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
             <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
@@ -747,12 +749,30 @@ function getAppHTML() {
       const d = await stockRes.json();
       const f = await fundRes.json();
 
+      const isCrypto = symbol.includes('-USD') || symbol.includes('-EUR');
+
       let html = \`
         <div class="card-top" style="margin-bottom:4px;">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
           <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}"><span class="live-dot"></span>\${d.change >= 0 ? '▲' : '▼'} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div></div>
         </div>
       \`;
+
+      // Handle Crypto Routing explicitly
+      if (isCrypto || f.isCrypto) {
+        html += \`
+          <div class="fund-section-title">Crypto Asset Profile</div>
+          <div class="grid">
+            \${statBox('1Y High', d.yearHigh)}
+            \${statBox('1Y Low', d.yearLow)}
+            \${statBox('24h Volume', d.volume)}
+            \${statBox('Mkt Cap', d.marketCap)}
+          </div>
+        \`;
+        body.innerHTML = html;
+        requestAnimationFrame(() => modal.focus());
+        return;
+      }
 
       if (!f.available) {
         html += \`
