@@ -2,7 +2,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // API Route: Ticker Search Engine (Global Equities, ETFs, Crypto)
+    // API Route: Ticker Search Engine (Global Equities, ETFs, Crypto, International)
     if (url.pathname === '/api/search') {
       const q = url.searchParams.get('q');
       if (!q) return json([]);
@@ -43,7 +43,6 @@ export default {
       const cleanSymbol = sanitizeSymbol(url.searchParams.get('s'));
       if (!cleanSymbol) return json({ error: 'No valid symbol provided' }, 400);
 
-      // Crypto Short-Circuit: Protects KV reads & Finnhub quota
       if (cleanSymbol.includes('-USD') || cleanSymbol.includes('-EUR')) {
         return json({ available: false, isCrypto: true });
       }
@@ -91,7 +90,6 @@ function json(data, status = 200) {
 
 function sanitizeSymbol(raw) {
   if (!raw) return null;
-  // Increased slice to 20 to support long international tickers like TATAMOTORS.NS
   const cleaned = raw.toUpperCase().trim().replace(/[^A-Z0-9.\-^]/g, '').slice(0, 20);
   return cleaned || null;
 }
@@ -127,7 +125,6 @@ function fmtDividendYield(fraction) {
 
 // --- Chart + price data ---
 async function fetchChartData(cleanSymbol) {
-  // Removed the explicit '.' to '-' replacement to protect .NS and .BO suffixes
   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSymbol)}?range=1y&interval=1d`;
   const liveUrl  = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSymbol)}?range=1d&interval=5m`;
 
@@ -141,7 +138,6 @@ async function fetchChartData(cleanSymbol) {
     fetch(liveUrl,  { headers: { 'User-Agent': UA } }).catch(() => null)
   ]);
 
-  // 1Y daily chart for the chart rendering + range stats
   if (chartRes && chartRes.ok) {
     try {
       const chartJson = await chartRes.json();
@@ -180,7 +176,6 @@ async function fetchChartData(cleanSymbol) {
     }
   }
 
-  // 1d intraday chart -> live price + previous day close
   let livePrice = 0;
   if (liveRes && liveRes.ok) {
     try {
@@ -198,7 +193,6 @@ async function fetchChartData(cleanSymbol) {
     }
   }
 
-  // Compute daily/live change
   let change = 0, changePercent = 0;
   if (livePrevClose) {
     change = price - livePrevClose;
@@ -349,8 +343,10 @@ function getAppHTML() {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: monospace; padding-bottom: 40px; font-size: 4.2vw; }
   header { background: var(--card); padding: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
-  h1 { font-size: 4vw; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  h1 { font-size: 4vw; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; text-transform: uppercase; letter-spacing: 0.5px; }
+  .logo-side { display: flex; align-items: center; gap: 6px; }
   .logo { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; }
+  #alpha-score { font-size: 3.4vw; color: var(--accent); border: 1px solid var(--border); padding: 2px 6px; border-radius: 3px; background: var(--bg); }
   .search-container { position: relative; }
   input { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 4.2vw; font-family: monospace; outline: none; }
   input:focus { border-color: var(--accent); }
@@ -362,23 +358,27 @@ function getAppHTML() {
   .res-name { font-size: 3.4vw; color: var(--muted); margin-top: 2px; }
 
   .card { background: var(--card); margin: 8px; padding: 12px; border-radius: 4px; border: 1px solid var(--border); }
-  .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+  .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
   .sym { font-size: 4.6vw; height: auto; font-weight: 700; color: #fff; }
   .name { font-size: 3.4vw; color: var(--muted); margin-top: 2px; word-break: break-all; }
   .price { text-align: right; }
   .p-val { font-size: 4.6vw; font-weight: 700; }
   .p-change { font-size: 3.6vw; font-weight: 600; margin-top: 2px; }
   .up { color: var(--up); } .down { color: var(--down); }
-  .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 3px; animation: pulse 1.4s infinite; vertical-align: middle; }
-  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.25;} }
+  
+  .yield-row { display: flex; justify-content: space-between; background: var(--bg); padding: 6px 8px; border-radius: 3px; border: 1px solid var(--border); font-size: 3.6vw; margin-top: 4px; margin-bottom: 2px; }
+  .yield-lbl { color: var(--muted); text-transform: uppercase; font-size: 3.2vw; }
+  .yield-val { font-weight: 700; }
 
   .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
-  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 3.6vw; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
+  .btn { id: btn; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 3.6vw; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
+  .btn-third { width: 45px; flex-shrink: 0; }
+  .btn-main { flex: 1; }
   .btn-primary { border-color: var(--accent); color: var(--accent); }
 
-  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 3.4vw; margin-top: 6px; cursor: pointer; padding: 0; text-transform: uppercase; width: 100%; }
+  .remove-btn { color: var(--down); background: transparent; border: none; font-size: 3.4vw; margin-top: 8px; cursor: pointer; padding: 0; text-transform: uppercase; width: 100%; text-align: center; display: block; }
 
-  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.98); z-index: 100; padding: 10px; overflow-y: scroll; -webkit-overflow-scrolling: touch; outline: none; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.98); z-index: 100; padding: 10px; overflow-y: auto; -webkit-overflow-scrolling: touch; outline: none; }
   #modal.show { display: block; }
   .modal-content { background: var(--card); border-radius: 4px; padding: 12px; border: 1px solid var(--border); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
@@ -400,13 +400,12 @@ function getAppHTML() {
   .info-row .stat-lbl { font-size: 3.4vw; }
   .info-row .stat-val { font-size: 3.8vw; text-align: right; }
   .fund-unavailable { text-align: center; padding: 16px 8px; color: var(--muted); font-size: 3.6vw; border: 1px dashed var(--border); border-radius: 4px; margin-top: 8px; line-height: 1.5; }
-
+  
   #chart-container { margin: 10px 0; position: relative; width: 100%; }
   .chart-svg { width: 100%; height: auto; display: block; }
   .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 3.6vw; }
   .timeline-label { display: flex; justify-content: space-between; margin-top: -2px; margin-bottom: 12px; font-size: 3vw; color: var(--muted); }
 
-  /* Chart styling - TradingView/Finviz-esque */
   .tv-grid { stroke: #1d1d1d; stroke-width: 0.6; }
   .tv-grid-month { stroke: #1a1a1a; stroke-width: 0.6; opacity: 0.6; }
   .tv-axis { stroke: #2a2a2a; stroke-width: 0.8; }
@@ -419,7 +418,10 @@ function getAppHTML() {
 <body>
 
 <header>
-  <h1><div class="logo"></div> cloudphone stocktracker</h1>
+  <h1>
+    <div class="logo-side"><div class="logo"></div> cloudphone stocktracker</div>
+    <div id="alpha-score">YIELD: --</div>
+  </h1>
   <div class="search-container">
     <input type="text" id="search-input" placeholder="Search Ticker..." autocomplete="off">
     <div id="search-results"></div>
@@ -439,16 +441,33 @@ function getAppHTML() {
 </div>
 
 <script>
-  let watchlist = [];
+  // Structured schema array mapping for Equal-Weight Ghost Portfolio entries
+  let portfolio = [];
 
-  const urlParams = new URLSearchParams(window.location.search);
-  const sParam = urlParams.get('s');
-  if (sParam) watchlist = sParam.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
-  // Default to AAPL, Bitcoin, and Reliance as a demo of international/crypto integration
-  if (watchlist.length === 0) watchlist = ['AAPL', 'BTC-USD', 'RELIANCE.NS'];
+  try {
+    const stored = localStorage.getItem('tracked_portfolio_v1');
+    if (stored) {
+      portfolio = JSON.parse(stored);
+    } else {
+      // Configuration fallback defaults: AAPL, SPCX, BTC-USD
+      portfolio = [
+        { symbol: 'AAPL', entryPrice: null, date: Date.now() },
+        { symbol: 'SPCX', entryPrice: null, date: Date.now() },
+        { symbol: 'BTC-USD', entryPrice: null, date: Date.now() }
+      ];
+      savePortfolio();
+    }
+  } catch(e) {
+    portfolio = [{ symbol: 'AAPL', entryPrice: null, date: Date.now() }];
+  }
+
+  function savePortfolio() {
+    localStorage.setItem('tracked_portfolio_v1', JSON.stringify(portfolio));
+  }
 
   function updateUrl() {
-    const newUrl = window.location.pathname + '?s=' + watchlist.join(',');
+    const symList = portfolio.map(p => p.symbol).join(',');
+    const newUrl = window.location.pathname + '?s=' + symList;
     window.history.replaceState({}, '', newUrl);
   }
 
@@ -485,7 +504,10 @@ function getAppHTML() {
 
   function addStock(symbol) {
     symbol = symbol.toUpperCase();
-    if (!watchlist.includes(symbol)) watchlist.push(symbol);
+    if (!portfolio.some(p => p.symbol === symbol)) {
+      portfolio.push({ symbol: symbol, entryPrice: null, date: Date.now() });
+      savePortfolio();
+    }
     document.getElementById('search-input').value = '';
     document.getElementById('search-results').classList.remove('show');
     updateUrl();
@@ -493,26 +515,68 @@ function getAppHTML() {
   }
 
   function removeStock(symbol) {
-    watchlist = watchlist.filter(s => s !== symbol);
+    portfolio = portfolio.filter(p => p.symbol !== symbol);
+    savePortfolio();
     updateUrl();
     renderWatchlist();
   }
 
+  // Toggle transaction baseline parameters (Lock Entry Price Base)
+  function toggleTrackYield(symbol, currentPrice) {
+    const idx = portfolio.findIndex(p => p.symbol === symbol);
+    if (idx !== -1) {
+      if (portfolio[idx].entryPrice === null) {
+        portfolio[idx].entryPrice = parseFloat(currentPrice);
+        portfolio[idx].date = Date.now();
+      } else {
+        portfolio[idx].entryPrice = null;
+      }
+      savePortfolio();
+      renderWatchlist();
+    }
+  }
+
   async function renderWatchlist() {
     const container = document.getElementById('watchlist');
-    if (watchlist.length === 0) {
+    if (portfolio.length === 0) {
       container.innerHTML = '<div class="empty">Watchlist empty. Search and build tracking elements.</div>';
+      document.getElementById('alpha-score').innerText = 'YIELD: --';
       return;
     }
 
     container.innerHTML = '<div class="empty">SYNCING MARKET MATRIX...</div>';
-    const html = await Promise.all(watchlist.map(async sym => {
+    
+    let totalYieldSum = 0;
+    let validYieldCount = 0;
+
+    const html = await Promise.all(portfolio.map(async item => {
       try {
-        const res = await fetch('/api/stock?s=' + sym);
-        if (!res.ok) throw new Error("Server error code configuration response");
+        const res = await fetch('/api/stock?s=' + item.symbol);
+        if (!res.ok) throw new Error();
         const d = await res.json();
         const upDown = d.change >= 0 ? 'up' : 'down';
         const arrow = d.change >= 0 ? '▲' : '▼';
+        
+        // Dynamic generation of individual card baseline yields
+        let yieldMarkup = '';
+        if (item.entryPrice !== null) {
+          const currentPriceNum = parseFloat(d.price);
+          const itemYield = ((currentPriceNum - item.entryPrice) / item.entryPrice) * 100;
+          totalYieldSum += itemYield;
+          validYieldCount++;
+          
+          const yieldColor = itemYield >= 0 ? 'var(--up)' : 'var(--down)';
+          const yieldArrow = itemYield >= 0 ? '▲' : '▼';
+          yieldMarkup = \`
+            <div class="yield-row">
+              <div class="yield-lbl">Basis: \$\${item.entryPrice.toFixed(2)}</div>
+              <div class="yield-val" style="color:\${yieldColor}">Yield: \${yieldArrow}\${Math.abs(itemYield).toFixed(2)}%</div>
+            </div>
+          \`;
+        }
+
+        const trackBtnText = item.entryPrice === null ? 'TRACK' : 'UNTRACK';
+        const trackBtnClass = item.entryPrice === null ? 'btn btn-third' : 'btn btn-third btn-primary';
 
         return \`
           <div class="card">
@@ -523,21 +587,36 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}"><span class="live-dot"></span>\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
+                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\text{\${d.changePercent}}%)</div>
               </div>
             </div>
+            \${yieldMarkup}
             <div class="card-links">
-              <a href="#" class="btn" onclick="openChart('\${sym}'); return false;">CHART</a>
-              <a href="#" class="btn btn-primary" onclick="openScreener('\${sym}'); return false;">SCREENER</a>
+              <button class="\${trackBtnClass}" onclick="toggleTrackYield('\${d.symbol}', '\${d.price}')">\${trackBtnText}</button>
+              <a href="#" class="btn btn-main" onclick="openChart('\${d.symbol}'); return false;">CHART</a>
+              <a href="#" class="btn btn-main btn-primary" onclick="openScreener('\${d.symbol}'); return false;">SCREENER</a>
             </div>
-            <button class="remove-btn" onclick="removeStock('\${sym}')">[Drop Element]</button>
+            <button class="remove-btn" onclick="removeStock('\${d.symbol}')">[Drop Element]</button>
           </div>
         \`;
       } catch(e) {
-        return \`<div class="card"><div class="sym">\${sym}</div><div class="name" style="color:var(--down)">NET_TIMEOUT</div></div>\`;
+        return \`<div class="card"><div class="sym">\${item.symbol}</div><div class="name" style="color:var(--down)">NET_TIMEOUT</div></div>\`;
       }
     }));
+
     container.innerHTML = html.join('');
+
+    // Compute aggregate structural profile metrics inside the layout header wrapper
+    if (validYieldCount > 0) {
+      const avgYield = totalYieldSum / validYieldCount;
+      const avgSign = avgYield >= 0 ? '▲' : '▼';
+      const scoreElement = document.getElementById('alpha-score');
+      scoreElement.innerText = \`YIELD: \${avgSign}\${Math.abs(avgYield).toFixed(2)}%\`;
+      scoreElement.style.color = avgYield >= 0 ? 'var(--up)' : 'var(--down)';
+    } else {
+      document.getElementById('alpha-score').innerText = 'YIELD: --';
+      document.getElementById('alpha-score').style.color = 'var(--accent)';
+    }
   }
 
   function statBox(label, value) {
@@ -550,7 +629,6 @@ function getAppHTML() {
     return \`<div class="info-row"><div class="stat-lbl">\${label}</div><div class="\${cls}">\${value}</div></div>\`;
   }
 
-  // ---- Full TradingView-style chart for the modal ----
   async function openChart(symbol) {
     const modal = document.getElementById('modal');
     const body = document.getElementById('modal-body');
@@ -569,7 +647,6 @@ function getAppHTML() {
       
       if (fundRes && fundRes.ok) {
         const f = await fundRes.json();
-        // Fallback to stock feed market cap if crypto/unavailable
         if (f.available && !f.isCrypto && f.valuation && f.valuation.marketCap !== 'N/A') {
           marketCap = f.valuation.marketCap;
         }
@@ -584,7 +661,6 @@ function getAppHTML() {
       const data = d.closes;
       const times = d.timestamps && d.timestamps.length === data.length ? d.timestamps : [];
 
-      // Chart geometry optimized for portrait phone screens
       const w = 260, h = 240; 
       const padL = 4, padR = 48, padT = 15, padB = 24;
       const chartW = w - padL - padR;
@@ -600,13 +676,11 @@ function getAppHTML() {
       const toX = (i) => padL + i * stepX;
       const toY = (v) => padT + chartH - ((v - yMin) / yRange) * chartH;
 
-      // Build line path
       let pathData = '';
       data.forEach((val, i) => {
         pathData += (i === 0 ? 'M' : 'L') + toX(i).toFixed(2) + ',' + toY(val).toFixed(2) + ' ';
       });
 
-      // Build area path
       const lastX  = toX(data.length - 1);
       const firstX = toX(0);
       const bottomY = padT + chartH;
@@ -618,7 +692,6 @@ function getAppHTML() {
       const color = isUp ? '#00ff00' : '#ff0000';
       const safeId = 'g_' + symbol.replace(/[^a-zA-Z0-9]/g, '');
 
-      // Horizontal gridlines + price labels
       const gridLines = [];
       const priceLines = 5;
       for (let g = 0; g < priceLines; g++) {
@@ -628,7 +701,6 @@ function getAppHTML() {
         gridLines.push({ y: yPos, val: yVal });
       }
 
-      // Month markers
       const monthMarkers = [];
       if (times.length) {
         let lastKey = '';
@@ -645,11 +717,9 @@ function getAppHTML() {
         }
       }
 
-      // Current price line + tag
       const lastY = toY(data[data.length - 1]);
       const lastPriceNum = Number(d.price) || data[data.length - 1];
 
-      // 52W high / low markers
       let hiIdx = 0, loIdx = 0;
       data.forEach((v, i) => {
         if (v > data[hiIdx]) hiIdx = i;
@@ -662,16 +732,9 @@ function getAppHTML() {
 
       body.innerHTML = \`
         <div class="card-top">
-          <div>
-            <div class="sym">\${d.symbol}</div>
-            <div class="name">\${d.name}</div>
-          </div>
-          <div class="price">
-            <div class="p-val">\$\${d.price}</div>
-            <div class="p-change \${isUp ? 'up' : 'down'}"><span class="live-dot"></span>\${isUp ? '▲' : '▼'} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
-          </div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
-
         <div id="chart-container">
           <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="xMidYMid meet">
             <defs>
@@ -681,42 +744,34 @@ function getAppHTML() {
                 <stop offset="100%" stop-color="\${color}" stop-opacity="0"/>
               </linearGradient>
             </defs>
-
             \${gridLines.map(g => \`
               <line class="tv-grid" x1="\${padL}" y1="\${g.y.toFixed(2)}" x2="\${padL + chartW}" y2="\${g.y.toFixed(2)}" />
               <text class="tv-price-lbl" x="\${padL + chartW + 4}" y="\${(g.y + 4).toFixed(2)}">\${g.val.toFixed(2)}</text>
             \`).join('')}
-
             \${monthMarkers.map(m => \`
               <line class="tv-grid-month" x1="\${m.x.toFixed(2)}" y1="\${padT}" x2="\${m.x.toFixed(2)}" y2="\${padT + chartH}" />
-              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\${m.label}</text>
+              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\text{\${m.label}}</text>
             \`).join('')}
-
-            <line class="tv-axis" x1="\${padL}" y1="\${(padT + chartH).toFixed(2)}" x2="\${padL + chartW}" y2="\${(padT + chartH).toFixed(2)}" />
+            <line class="tv-axis" x1="\${padL}" y1="\text{\${(padT + chartH).toFixed(2)}}" x2="\text{\${padL + chartW}}" y2="\${(padT + chartH).toFixed(2)}" />
             <line class="tv-axis" x1="\${(padL + chartW).toFixed(2)}" y1="\${padT}" x2="\${(padL + chartW).toFixed(2)}" y2="\${padT + chartH}" />
-
             <path d="\${areaPath}" fill="url(#\${safeId})" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
-
             <line class="tv-last-line" stroke="\${color}" x1="\${hiX.toFixed(2)}" y1="\${hiY.toFixed(2)}" x2="\${padL + chartW}" y2="\${hiY.toFixed(2)}" opacity="0.25"/>
             <line class="tv-last-line" stroke="\${color}" x1="\${loX.toFixed(2)}" y1="\${loY.toFixed(2)}" x2="\${padL + chartW}" y2="\${loY.toFixed(2)}" opacity="0.25"/>
             <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
             <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
-
             <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
-            <rect x="\${(padL + chartW + 1).toFixed(2)}" y="\${(lastY - 6).toFixed(2)}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
-            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
+            <rect x="\text{\${(padL + chartW + 1).toFixed(2)}}" y="\text{\${(lastY - 6).toFixed(2)}}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
+            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\text{\${lastPriceNum.toFixed(2)}}</text>
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.8" fill="\${color}" />
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="5" fill="\${color}" opacity="0.25" />
           </svg>
         </div>
-
         <div class="timeline-label">
           <span>\${d.startDate}</span>
           <span style="color:var(--accent);">1Y · Daily Close</span>
           <span>\${d.endDate}</span>
         </div>
-
         <div class="grid">
           \${statBox('1Y High', d.yearHigh)}
           \${statBox('1Y Low', d.yearLow)}
@@ -727,7 +782,6 @@ function getAppHTML() {
     } catch(e) {
       body.innerHTML = '<div class="empty">Chart processing pipeline failure.</div>';
     }
-    // Auto-focus modal to capture D-pad scrolling immediately on feature phones
     requestAnimationFrame(() => {
       modal.scrollTop = 0;
       modal.focus();
@@ -754,12 +808,11 @@ function getAppHTML() {
 
       let html = \`
         <div class="card-top" style="margin-bottom:4px;">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}"><span class="live-dot"></span>\${d.change >= 0 ? '▲' : '▼'} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div></div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
       \`;
 
-      // Handle Crypto Routing explicitly or Unavailable International Stocks (Fallback)
       if (isCrypto || f.isCrypto || !f.available) {
         const disclaimer = (isCrypto || f.isCrypto) 
           ? "Crypto assets do not have traditional corporate fundamentals." 
@@ -861,7 +914,6 @@ function getAppHTML() {
     } catch(e) {
       body.innerHTML = '<div class="empty">Ledger interpretation timeout error.</div>';
     }
-    // Auto-focus modal to capture D-pad scrolling immediately on feature phones
     requestAnimationFrame(() => {
       modal.scrollTop = 0;
       modal.focus();
@@ -872,6 +924,7 @@ function getAppHTML() {
     document.getElementById('modal').classList.remove('show');
   }
 
+  // Execute structural generation loop on application wake context
   renderWatchlist();
 </script>
 </body>
