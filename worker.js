@@ -371,9 +371,7 @@ function getAppHTML() {
   .yield-val { font-weight: 700; }
 
   .card-links { display: flex; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
-  .btn { id: btn; text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 3.6vw; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); }
-  .btn-third { width: 45px; flex-shrink: 0; }
-  .btn-main { flex: 1; }
+  .btn { text-align: center; padding: 8px; border-radius: 4px; text-decoration: none; font-size: 3.6vw; font-weight: 600; border: 1px solid var(--border); color: var(--text); background: var(--bg); flex: 1; }
   .btn-primary { border-color: var(--accent); color: var(--accent); }
 
   .remove-btn { color: var(--down); background: transparent; border: none; font-size: 3.4vw; margin-top: 8px; cursor: pointer; padding: 0; text-transform: uppercase; width: 100%; text-align: center; display: block; }
@@ -576,7 +574,7 @@ function getAppHTML() {
         }
 
         const trackBtnText = item.entryPrice === null ? 'TRACK' : 'UNTRACK';
-        const trackBtnClass = item.entryPrice === null ? 'btn btn-third' : 'btn btn-third btn-primary';
+        const trackBtnClass = 'btn' + (item.entryPrice !== null ? ' btn-primary' : '');
 
         return \`
           <div class="card">
@@ -587,14 +585,14 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\text{\${d.changePercent}}%)</div>
+                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\\text{\${d.changePercent}}%)</div>
               </div>
             </div>
             \${yieldMarkup}
             <div class="card-links">
               <button class="\${trackBtnClass}" onclick="toggleTrackYield('\${d.symbol}', '\${d.price}')">\${trackBtnText}</button>
-              <a href="#" class="btn btn-main" onclick="openChart('\${d.symbol}'); return false;">CHART</a>
-              <a href="#" class="btn btn-main btn-primary" onclick="openScreener('\${d.symbol}'); return false;">SCREENER</a>
+              <a href="#" class="btn btn-primary" onclick="openChart('\${d.symbol}'); return false;">CHART</a>
+              <a href="#" class="btn btn-primary" onclick="openScreener('\${d.symbol}'); return false;">SCREENER</a>
             </div>
             <button class="remove-btn" onclick="removeStock('\${d.symbol}')">[Drop Element]</button>
           </div>
@@ -733,7 +731,7 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\\text{\${d.changePercent}}%</div></div>
         </div>
         <div id="chart-container">
           <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="xMidYMid meet">
@@ -750,9 +748,9 @@ function getAppHTML() {
             \`).join('')}
             \${monthMarkers.map(m => \`
               <line class="tv-grid-month" x1="\${m.x.toFixed(2)}" y1="\${padT}" x2="\${m.x.toFixed(2)}" y2="\${padT + chartH}" />
-              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\text{\${m.label}}</text>
+              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\\text{\${m.label}}</text>
             \`).join('')}
-            <line class="tv-axis" x1="\${padL}" y1="\text{\${(padT + chartH).toFixed(2)}}" x2="\text{\${padL + chartW}}" y2="\${(padT + chartH).toFixed(2)}" />
+            <line class="tv-axis" x1="\${padL}" y1="\${(padT + chartH).toFixed(2)}" x2="\${padL + chartW}" y2="\${(padT + chartH).toFixed(2)}" />
             <line class="tv-axis" x1="\${(padL + chartW).toFixed(2)}" y1="\${padT}" x2="\${(padL + chartW).toFixed(2)}" y2="\${padT + chartH}" />
             <path d="\${areaPath}" fill="url(#\${safeId})" />
             <path d="\${pathData}" fill="none" stroke="\${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
@@ -761,8 +759,8 @@ function getAppHTML() {
             <circle cx="\${hiX.toFixed(2)}" cy="\${hiY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
             <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
             <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
-            <rect x="\text{\${(padL + chartW + 1).toFixed(2)}}" y="\text{\${(lastY - 6).toFixed(2)}}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
-            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\text{\${lastPriceNum.toFixed(2)}}</text>
+            <rect x="\${(padL + chartW + 1).toFixed(2)}" y="\${(lastY - 6).toFixed(2)}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
+            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\\text{\${lastPriceNum.toFixed(2)}}</text>
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.8" fill="\${color}" />
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="5" fill="\${color}" opacity="0.25" />
           </svg>
@@ -808,8 +806,8 @@ function getAppHTML() {
 
       let html = \`
         <div class="card-top" style="margin-bottom:4px;">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\text{\${d.name}}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\\text{\${d.name}}</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\\text{\${d.changePercent}}%</div></div>
         </div>
       \`;
 
