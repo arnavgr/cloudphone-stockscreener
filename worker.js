@@ -2,7 +2,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // API Route: Ticker Search Engine
+    // API Route: Ticker Search Engine (Global Equities, ETFs, Crypto)
     if (url.pathname === '/api/search') {
       const q = url.searchParams.get('q');
       if (!q) return json([]);
@@ -13,7 +13,6 @@ export default {
         });
         const data = await res.json();
         const results = (data.quotes || [])
-          // Added CRYPTOCURRENCY filter for Yahoo search
           .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'CRYPTOCURRENCY')
           .map(q => ({ symbol: q.symbol, name: q.shortname || q.longname || q.symbol }));
         return json(results);
@@ -92,7 +91,8 @@ function json(data, status = 200) {
 
 function sanitizeSymbol(raw) {
   if (!raw) return null;
-  const cleaned = raw.toUpperCase().trim().replace(/[^A-Z0-9.\-^]/g, '').slice(0, 12);
+  // Increased slice to 20 to support long international tickers like TATAMOTORS.NS
+  const cleaned = raw.toUpperCase().trim().replace(/[^A-Z0-9.\-^]/g, '').slice(0, 20);
   return cleaned || null;
 }
 
@@ -127,9 +127,9 @@ function fmtDividendYield(fraction) {
 
 // --- Chart + price data ---
 async function fetchChartData(cleanSymbol) {
-  const yfSymbol = cleanSymbol.replace('.', '-');
-  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1y&interval=1d`;
-  const liveUrl  = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?range=1d&interval=5m`;
+  // Removed the explicit '.' to '-' replacement to protect .NS and .BO suffixes
+  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSymbol)}?range=1y&interval=1d`;
+  const liveUrl  = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSymbol)}?range=1d&interval=5m`;
 
   let price = 0, name = cleanSymbol, closes = [], timestamps = [];
   let volume = 0, marketCap = 0;
@@ -444,7 +444,8 @@ function getAppHTML() {
   const urlParams = new URLSearchParams(window.location.search);
   const sParam = urlParams.get('s');
   if (sParam) watchlist = sParam.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
-  if (watchlist.length === 0) watchlist = ['AAPL', 'MSFT', 'BTC-USD'];
+  // Default to AAPL, Bitcoin, and Reliance as a demo of international/crypto integration
+  if (watchlist.length === 0) watchlist = ['AAPL', 'BTC-USD', 'RELIANCE.NS'];
 
   function updateUrl() {
     const newUrl = window.location.pathname + '?s=' + watchlist.join(',');
@@ -758,29 +759,18 @@ function getAppHTML() {
         </div>
       \`;
 
-      // Handle Crypto Routing explicitly
-      if (isCrypto || f.isCrypto) {
-        html += \`
-          <div class="fund-section-title">Crypto Asset Profile</div>
-          <div class="grid">
-            \${statBox('1Y High', d.yearHigh)}
-            \${statBox('1Y Low', d.yearLow)}
-            \${statBox('24h Volume', d.volume)}
-            \${statBox('Mkt Cap', d.marketCap)}
-          </div>
-        \`;
-        body.innerHTML = html;
-        requestAnimationFrame(() => modal.focus());
-        return;
-      }
-
-      if (!f.available) {
+      // Handle Crypto Routing explicitly or Unavailable International Stocks (Fallback)
+      if (isCrypto || f.isCrypto || !f.available) {
+        const disclaimer = (isCrypto || f.isCrypto) 
+          ? "Crypto assets do not have traditional corporate fundamentals." 
+          : "Deep fundamentals are temporarily unavailable for this asset (International Market or Key required).";
+        
         html += \`
           <div class="fund-unavailable">
-            Deep fundamentals are temporarily unavailable (API Key configuration required).<br>
-            Price, volume and 1Y range below still come from the live chart feed.
+            \${disclaimer}<br>
+            Price, volume and 1Y range below come from the live market feed.
           </div>
-          <div class="fund-section-title">Trading Range</div>
+          <div class="fund-section-title">Trading Range Profile</div>
           <div class="grid">
             \${statBox('1Y High', d.yearHigh)}
             \${statBox('1Y Low', d.yearLow)}
