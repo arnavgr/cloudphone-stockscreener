@@ -585,7 +585,7 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\\text{\${d.changePercent}}%)</div>
+                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
               </div>
             </div>
             \${yieldMarkup}
@@ -731,7 +731,7 @@ function getAppHTML() {
       body.innerHTML = \`
         <div class="card-top">
           <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\\text{\${d.changePercent}}%</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
         <div id="chart-container">
           <svg class="chart-svg" viewBox="0 0 \${w} \${h}" preserveAspectRatio="xMidYMid meet">
@@ -748,7 +748,7 @@ function getAppHTML() {
             \`).join('')}
             \${monthMarkers.map(m => \`
               <line class="tv-grid-month" x1="\${m.x.toFixed(2)}" y1="\${padT}" x2="\${m.x.toFixed(2)}" y2="\${padT + chartH}" />
-              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\\text{\${m.label}}</text>
+              <text class="tv-month-lbl" x="\${m.x.toFixed(2)}" y="\${h - 6}" text-anchor="middle">\${m.label}</text>
             \`).join('')}
             <line class="tv-axis" x1="\${padL}" y1="\${(padT + chartH).toFixed(2)}" x2="\${padL + chartW}" y2="\${(padT + chartH).toFixed(2)}" />
             <line class="tv-axis" x1="\${(padL + chartW).toFixed(2)}" y1="\${padT}" x2="\${(padL + chartW).toFixed(2)}" y2="\${padT + chartH}" />
@@ -760,7 +760,7 @@ function getAppHTML() {
             <circle cx="\${loX.toFixed(2)}" cy="\${loY.toFixed(2)}" r="1.8" fill="\${color}" opacity="0.55"/>
             <line class="tv-last-line" stroke="\${color}" x1="\${padL}" y1="\${lastY.toFixed(2)}" x2="\${(padL + chartW).toFixed(2)}" y2="\${lastY.toFixed(2)}" />
             <rect x="\${(padL + chartW + 1).toFixed(2)}" y="\${(lastY - 6).toFixed(2)}" width="\${padR - 2}" height="12" fill="\${color}" rx="1.5"/>
-            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\\text{\${lastPriceNum.toFixed(2)}}</text>
+            <text class="tv-tag-txt" x="\${(padL + chartW + 4).toFixed(2)}" y="\${(lastY + 3).toFixed(2)}" fill="#000">\${lastPriceNum.toFixed(2)}</text>
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="2.8" fill="\${color}" />
             <circle cx="\${lastX.toFixed(2)}" cy="\${lastY.toFixed(2)}" r="5" fill="\${color}" opacity="0.25" />
           </svg>
@@ -806,8 +806,8 @@ function getAppHTML() {
 
       let html = \`
         <div class="card-top" style="margin-bottom:4px;">
-          <div><div class="sym">\${d.symbol}</div><div class="name">\\text{\${d.name}}</div></div>
-          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\\text{\${d.changePercent}}%</div></div>
+          <div><div class="sym">\${d.symbol}</div><div class="name">\${d.name}</div></div>
+          <div class="price"><div class="p-val">\$\${d.price}</div><div class="p-change \${d.change >= 0 ? 'up' : 'down'}">\${d.changePercent}%</div></div>
         </div>
       \`;
 
