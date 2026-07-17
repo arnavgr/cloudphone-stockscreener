@@ -111,7 +111,8 @@ function fmtNum(val, decimals = 2) {
 
 function fmtPct(fraction, decimals = 2) {
   if (fraction === null || fraction === undefined || isNaN(fraction)) return 'N/A';
-  const pct = fraction * 100;
+  let pct = fraction * 100;
+  if (Object.is(pct, -0)) pct = 0; // Prevent negative zero
   const sign = pct > 0 ? '+' : '';
   return sign + pct.toFixed(decimals) + '%';
 }
@@ -120,6 +121,7 @@ function fmtDividendYield(fraction) {
   if (fraction === null || fraction === undefined || isNaN(fraction)) return 'N/A';
   let pct = fraction * 100;
   if (Math.abs(pct) > 25) pct = fraction;
+  if (Object.is(pct, -0)) pct = 0; // Prevent negative zero
   return pct.toFixed(2) + '%';
 }
 
@@ -230,6 +232,13 @@ function mVal(metric, ...candidates) {
   return null;
 }
 
+// Safe percentage extractor to prevent null/100 = 0% bugs
+function pctVal(metric, ...keys) {
+  const v = mVal(metric, ...keys);
+  if (v === null || v === undefined) return null;
+  return v / 100;
+}
+
 async function fetchFundamentals(cleanSymbol, env) {
   const apiKey = env && env.FINNHUB_API_KEY;
   if (!apiKey) return { available: false, reason: 'missing_api_key' };
@@ -280,18 +289,18 @@ async function fetchFundamentals(cleanSymbol, env) {
         revenuePerShare: fmtNum(mVal(metric, 'revenuePerShareTTM'))
       },
       profitability: {
-        profitMargin: fmtPct(mVal(metric, 'netProfitMarginTTM') / 100),
-        operatingMargin: fmtPct(mVal(metric, 'operatingMarginTTM') / 100),
-        grossMargin: fmtPct(mVal(metric, 'grossMarginTTM') / 100),
-        roe: fmtPct(mVal(metric, 'roeTTM') / 100),
-        roa: fmtPct(mVal(metric, 'roaTTM') / 100)
+        profitMargin: fmtPct(pctVal(metric, 'netProfitMarginTTM')),
+        operatingMargin: fmtPct(pctVal(metric, 'operatingMarginTTM')),
+        grossMargin: fmtPct(pctVal(metric, 'grossMarginTTM')),
+        roe: fmtPct(pctVal(metric, 'roeTTM')),
+        roa: fmtPct(pctVal(metric, 'roaTTM'))
       },
       growth: {
-        revenueGrowth: fmtPct(mVal(metric, 'revenueGrowthTTMYoy') / 100),
-        earningsGrowth: fmtPct(mVal(metric, 'epsGrowthTTMYoy') / 100)
+        revenueGrowth: fmtPct(pctVal(metric, 'revenueGrowthTTMYoy')),
+        earningsGrowth: fmtPct(pctVal(metric, 'epsGrowthTTMYoy'))
       },
       dividends: {
-        yield: fmtDividendYield(mVal(metric, 'dividendYieldIndicatedAnnual', 'currentDividendYieldTTM') / 100),
+        yield: fmtDividendYield(pctVal(metric, 'dividendYieldIndicatedAnnual', 'currentDividendYieldTTM')),
         perShare: fmtNum(mVal(metric, 'dividendPerShareAnnual'))
       },
       financialHealth: {
@@ -524,8 +533,14 @@ function getAppHTML() {
     const idx = portfolio.findIndex(p => p.symbol === symbol);
     if (idx !== -1) {
       if (portfolio[idx].entryPrice === null) {
-        portfolio[idx].entryPrice = parseFloat(currentPrice);
-        portfolio[idx].date = Date.now();
+        const parsedPrice = parseFloat(currentPrice);
+        // Prevent tracking if price is invalid or 0
+        if (!isNaN(parsedPrice) && parsedPrice > 0) {
+          portfolio[idx].entryPrice = parsedPrice;
+          portfolio[idx].date = Date.now();
+        } else {
+          return; 
+        }
       } else {
         portfolio[idx].entryPrice = null;
       }
@@ -534,8 +549,13 @@ function getAppHTML() {
     }
   }
 
+  // Race condition tracker for rendering
+  let renderRequestId = 0;
+
   async function renderWatchlist() {
+    const myRequestId = ++renderRequestId;
     const container = document.getElementById('watchlist');
+    
     if (portfolio.length === 0) {
       container.innerHTML = '<div class="empty">Watchlist empty. Search and build tracking elements.</div>';
       document.getElementById('alpha-score').innerText = 'YIELD: --';
@@ -552,25 +572,36 @@ function getAppHTML() {
         const res = await fetch('/api/stock?s=' + item.symbol);
         if (!res.ok) throw new Error();
         const d = await res.json();
-        const upDown = d.change >= 0 ? 'up' : 'down';
-        const arrow = d.change >= 0 ? '▲' : '▼';
+        
+        // Parse numbers cleanly to prevent string comparison bugs
+        const changeNum = parseFloat(d.change) || 0;
+        const upDown = changeNum >= 0 ? 'up' : 'down';
+        const arrow = changeNum >= 0 ? '▲' : '▼';
         
         // Dynamic generation of individual card baseline yields
         let yieldMarkup = '';
-        if (item.entryPrice !== null) {
+        if (item.entryPrice !== null && item.entryPrice > 0) {
           const currentPriceNum = parseFloat(d.price);
-          const itemYield = ((currentPriceNum - item.entryPrice) / item.entryPrice) * 100;
-          totalYieldSum += itemYield;
-          validYieldCount++;
           
-          const yieldColor = itemYield >= 0 ? 'var(--up)' : 'var(--down)';
-          const yieldArrow = itemYield >= 0 ? '▲' : '▼';
-          yieldMarkup = \`
-            <div class="yield-row">
-              <div class="yield-lbl">Basis: \$\${item.entryPrice.toFixed(2)}</div>
-              <div class="yield-val" style="color:\${yieldColor}">Yield: \${yieldArrow}\${Math.abs(itemYield).toFixed(2)}%</div>
-            </div>
-          \`;
+          // Calculate yield only if the current price is valid
+          if (!isNaN(currentPriceNum) && isFinite(currentPriceNum)) {
+            const itemYield = ((currentPriceNum - item.entryPrice) / item.entryPrice) * 100;
+            
+            // Protect against Infinity/NaN corrupting total yield
+            if (!isNaN(itemYield) && isFinite(itemYield)) {
+              totalYieldSum += itemYield;
+              validYieldCount++;
+            }
+            
+            const yieldColor = itemYield >= 0 ? 'var(--up)' : 'var(--down)';
+            const yieldArrow = itemYield >= 0 ? '▲' : '▼';
+            yieldMarkup = \`
+              <div class="yield-row">
+                <div class="yield-lbl">Basis: \$\${item.entryPrice.toFixed(2)}</div>
+                <div class="yield-val" style="color:\${yieldColor}">Yield: \${yieldArrow}\${Math.abs(itemYield).toFixed(2)}%</div>
+              </div>
+            \`;
+          }
         }
 
         const trackBtnText = item.entryPrice === null ? 'TRACK' : 'UNTRACK';
@@ -585,7 +616,7 @@ function getAppHTML() {
               </div>
               <div class="price">
                 <div class="p-val">\$\${d.price}</div>
-                <div class="p-change \${upDown}">\${arrow} \${Math.abs(Number(d.change)).toFixed(2)} (\${d.changePercent}%)</div>
+                <div class="p-change \${upDown}">\${arrow} \${Math.abs(changeNum).toFixed(2)} (\${d.changePercent}%)</div>
               </div>
             </div>
             \${yieldMarkup}
@@ -601,6 +632,9 @@ function getAppHTML() {
         return \`<div class="card"><div class="sym">\${item.symbol}</div><div class="name" style="color:var(--down)">NET_TIMEOUT</div></div>\`;
       }
     }));
+
+    // Race condition guard: if a newer render was triggered, abort DOM update
+    if (myRequestId !== renderRequestId) return;
 
     container.innerHTML = html.join('');
 
@@ -686,7 +720,7 @@ function getAppHTML() {
         'L' + lastX.toFixed(2) + ',' + bottomY.toFixed(2) + ' ' +
         'L' + firstX.toFixed(2) + ',' + bottomY.toFixed(2) + ' Z';
 
-      const isUp = Number(d.change) >= 0;
+      const isUp = parseFloat(d.change) >= 0;
       const color = isUp ? '#00ff00' : '#ff0000';
       const safeId = 'g_' + symbol.replace(/[^a-zA-Z0-9]/g, '');
 
@@ -716,7 +750,7 @@ function getAppHTML() {
       }
 
       const lastY = toY(data[data.length - 1]);
-      const lastPriceNum = Number(d.price) || data[data.length - 1];
+      const lastPriceNum = parseFloat(d.price) || data[data.length - 1];
 
       let hiIdx = 0, loIdx = 0;
       data.forEach((v, i) => {
